@@ -21,4 +21,3 @@ cargo run
 ```
 
 Nunca uses capital propio.
-
