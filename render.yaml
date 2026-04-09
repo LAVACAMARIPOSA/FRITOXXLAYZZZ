@@ -5,10 +5,10 @@ services:
     buildCommand: cargo build --release
     startCommand: ./target/release/solana-zero-capital-beast
     envVars:
+      - key: RPC_URL
+        sync: false
       - key: SOLANA_KEYPAIR_JSON
         sync: false
       - key: RUST_LOG
         value: info
-        sync: false
-      - key: RPC_URL
         sync: false

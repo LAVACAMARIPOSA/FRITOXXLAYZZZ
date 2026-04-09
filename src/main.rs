@@ -13,7 +13,7 @@ use tokio::time::{sleep, Duration};
 async fn main() {
     tracing_subscriber::fmt::init();
     utils::log_success("🚀 Solana Zero-Capital Beast v1.0 - Listo para Render");
-    utils::log_info("Flash Loan Kamino + Jupiter + Jito Bundles");
+    utils::log_info("Flash Loan Kamino + Jupiter Arbitrage + Jito Bundles");
 
     let keypair = utils::load_keypair();
     utils::log_success(&format!("Wallet cargada: {}", keypair.pubkey()));
