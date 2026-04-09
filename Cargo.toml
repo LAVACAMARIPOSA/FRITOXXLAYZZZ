@@ -7,7 +7,10 @@ edition = "2021"
 solana-sdk = "2.1"
 solana-client = "2.1"
 solana-program = "2.1"
+solana-transaction-status = "2.1"
+solana-account-decoder = "2.1"
 anchor-lang = { version = "0.30", features = ["derive"] }
+anchor-spl = { version = "0.30", features = ["metadata"] }
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", features = ["json"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -17,4 +20,24 @@ bytemuck = "1.18"
 futures = "0.3"
 tracing = "0.1"
 tracing-subscriber = "0.3"
+borsh = { version = "1.5", features = ["derive"] }
+bs58 = "0.5"
+base64 = "0.22"
+thiserror = "1.0"
+uuid = { version = "1.10", features = ["v4"] }
+spl-token = "6.0"
+spl-associated-token-account = "5.0"
 jito-protos = { git = "https://github.com/jito-labs/jito-protos", rev = "main" }
+tonic = { version = "0.12", features = ["tls", "tls-roots"] }
+prost = "0.13"
+prost-types = "0.13"
+
+# Kamino Lending SDK - CPI Client
+kamino-lend = "0.4"
+
+[dev-dependencies]
+tokio-test = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = true

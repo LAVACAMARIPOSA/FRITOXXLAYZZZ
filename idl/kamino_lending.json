@@ -1,0 +1,309 @@
+{
+  "version": "1.11.0",
+  "name": "kamino_lending",
+  "instructions": [
+    {
+      "name": "flashBorrowReserveLiquidity",
+      "accounts": [
+        {
+          "name": "userTransferAuthority",
+          "isMut": false,
+          "isSigner": true
+        },
+        {
+          "name": "lendingMarketAuthority",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "lendingMarket",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "reserve",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "reserveLiquidityMint",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "reserveSourceLiquidity",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "userDestinationLiquidity",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "reserveLiquidityFeeReceiver",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "referrerTokenState",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "referrerAccount",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "sysvarInfo",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "tokenProgram",
+          "isMut": false,
+          "isSigner": false
+        }
+      ],
+      "args": [
+        {
+          "name": "liquidityAmount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "flashRepayReserveLiquidity",
+      "accounts": [
+        {
+          "name": "userTransferAuthority",
+          "isMut": false,
+          "isSigner": true
+        },
+        {
+          "name": "lendingMarketAuthority",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "lendingMarket",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "reserve",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "reserveLiquidityMint",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "reserveDestinationLiquidity",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "userSourceLiquidity",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "reserveLiquidityFeeReceiver",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "referrerTokenState",
+          "isMut": true,
+          "isSigner": false
+        },
+        {
+          "name": "referrerAccount",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "sysvarInfo",
+          "isMut": false,
+          "isSigner": false
+        },
+        {
+          "name": "tokenProgram",
+          "isMut": false,
+          "isSigner": false
+        }
+      ],
+      "args": [
+        {
+          "name": "liquidityAmount",
+          "type": "u64"
+        },
+        {
+          "name": "borrowInstructionIndex",
+          "type": "u8"
+        }
+      ]
+    }
+  ],
+  "accounts": [
+    {
+      "name": "Reserve",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "version",
+            "type": "u8"
+          },
+          {
+            "name": "lastUpdate",
+            "type": {
+              "defined": "LastUpdate"
+            }
+          },
+          {
+            "name": "lendingMarket",
+            "type": "publicKey"
+          },
+          {
+            "name": "liquidity",
+            "type": {
+              "defined": "ReserveLiquidity"
+            }
+          },
+          {
+            "name": "collateral",
+            "type": {
+              "defined": "ReserveCollateral"
+            }
+          },
+          {
+            "name": "config",
+            "type": {
+              "defined": "ReserveConfig"
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "types": [
+    {
+      "name": "LastUpdate",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "slot",
+            "type": "u64"
+          },
+          {
+            "name": "stale",
+            "type": "bool"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ReserveLiquidity",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "mintPubkey",
+            "type": "publicKey"
+          },
+          {
+            "name": "mintDecimals",
+            "type": "u64"
+          },
+          {
+            "name": "supplyPubkey",
+            "type": "publicKey"
+          },
+          {
+            "name": "feeReceiver",
+            "type": "publicKey"
+          },
+          {
+            "name": "availableAmount",
+            "type": "u64"
+          },
+          {
+            "name": "borrowedAmountSf",
+            "type": "u128"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ReserveCollateral",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "mintPubkey",
+            "type": "publicKey"
+          },
+          {
+            "name": "mintTotalSupply",
+            "type": "u64"
+          },
+          {
+            "name": "supplyPubkey",
+            "type": "publicKey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ReserveConfig",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "status",
+            "type": "u8"
+          },
+          {
+            "name": "assetTier",
+            "type": "u8"
+          },
+          {
+            "name": "fees",
+            "type": {
+              "defined": "ReserveFees"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "ReserveFees",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "borrowFeeSf",
+            "type": "u64"
+          },
+          {
+            "name": "flashLoanFeeSf",
+            "type": "u64"
+          },
+          {
+            "name": "referralFeeBps",
+            "type": "u16"
+          }
+        ]
+      }
+    }
+  ],
+  "metadata": {
+    "address": "KLend2g3cP87fffoy8q1mQqGKjrxjC8boSyAYavgmjD"
+  }
+}
