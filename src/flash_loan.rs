@@ -1,5 +1,10 @@
-use solana_client::rpc_client::RpcClient;
-use solana_sdk::{instruction::Instruction, message::v0::Message, transaction::VersionedTransaction};
+use solana_client::nonblocking::rpc_client::RpcClient;
+use solana_sdk::{
+    instruction::Instruction,
+    message::{v0::Message, VersionedMessage},
+    signature::Signer,
+    transaction::VersionedTransaction,
+};
 
 use crate::utils;
 
@@ -19,7 +24,7 @@ pub async fn build_flash_loan_tx(
 
     let message = Message::try_compile(&keypair.pubkey(), &instructions, &[], recent_blockhash)?;
 
-    let tx = VersionedTransaction::try_new(message, &[keypair])?;
+    let tx = VersionedTransaction::try_new(VersionedMessage::V0(message), &[keypair])?;
 
     // Simulación
     let sim = client.simulate_transaction(&tx).await?;

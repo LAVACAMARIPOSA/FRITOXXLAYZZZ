@@ -1,4 +1,5 @@
 use solana_sdk::pubkey::Pubkey;
+use std::env;
 use std::str::FromStr;
 
 pub const RPC_URL: &str = "https://api.mainnet-beta.solana.com";
@@ -9,6 +10,10 @@ pub const JITO_BLOCK_ENGINE_URL: &str = "https://mainnet.block-engine.jito.wtf";
 pub const DRY_RUN: bool = true;
 pub const MIN_PROFIT_USD: f64 = 0.8;
 pub const MAX_TIP_PERCENT: f64 = 0.80;
+
+pub fn rpc_url() -> String {
+    env::var("RPC_URL").unwrap_or_else(|_| RPC_URL.to_string())
+}
 
 pub fn kamino_program_id() -> Pubkey {
     Pubkey::from_str(KAMINO_PROGRAM_ID).unwrap()

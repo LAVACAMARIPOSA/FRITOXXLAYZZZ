@@ -5,7 +5,9 @@ mod jupiter;
 mod liquidation;
 mod utils;
 
-use solana_client::rpc_client::RpcClient;
+use solana_client::nonblocking::rpc_client::RpcClient;
+use solana_sdk::signature::Signer;
+use std::env;
 use tokio::time::{sleep, Duration};
 
 #[tokio::main]
@@ -14,10 +16,11 @@ async fn main() {
     utils::log_success("🚀 Solana Zero-Capital Beast v1.0 - COMPLETO");
     utils::log_info("Flash Loan Kamino + Jupiter Arbitrage + Jito Bundles + Liquidaciones");
 
-    let keypair = utils::load_keypair("keypair.json");
+    let keypair_path = env::var("KEYPAIR_PATH").unwrap_or_else(|_| "keypair.json".to_string());
+    let keypair = utils::load_keypair(&keypair_path);
     utils::log_success(&format!("Wallet cargada: {}", keypair.pubkey()));
 
-    let client = RpcClient::new(config::RPC_URL.to_string());
+    let client = RpcClient::new(config::rpc_url());
 
     loop {
         utils::log_info("=== Nuevo ciclo de búsqueda ===");
