@@ -132,7 +132,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     agent_memory.reset();
                     telegram.send_alert("Memoria reseteada").await;
                 }
-                BotCommand::Unknown(_) => {}
+                BotCommand::Help => {
+                    telegram.send_message(&telegram::TelegramBot::help_text()).await;
+                }
+                BotCommand::Unknown(msg) => {
+                    // Ask Groq AI for a conversational response
+                    let context = format!(
+                        "Ciclos: {}\nActivo: {}\nRiesgo: {:?}\nProfit total: ${:.2}\nOportunidades: {}\nFallos: {}\nRacha: {}\nDRY_RUN: {}",
+                        cycle, running, agent_memory.risk_level,
+                        agent_memory.total_profit_usd, agent_memory.total_opportunities,
+                        agent_memory.total_failures, agent_memory.current_win_streak,
+                        config::DRY_RUN
+                    );
+                    if let Some(ai_cmd) = telegram.handle_unknown_with_ai(&msg, &context).await {
+                        // AI detected user intent - execute the command
+                        match ai_cmd {
+                            BotCommand::Start => {
+                                running = true;
+                                telegram.send_alert("Agente ACTIVADO").await;
+                            }
+                            BotCommand::Stop => {
+                                running = false;
+                                telegram.send_alert("Agente PAUSADO").await;
+                            }
+                            BotCommand::Aggressive => {
+                                agent_memory.set_risk_level(memory::RiskLevel::Aggressive);
+                            }
+                            BotCommand::Safe => {
+                                agent_memory.set_risk_level(memory::RiskLevel::Safe);
+                            }
+                            BotCommand::Reset => {
+                                agent_memory.reset();
+                            }
+                            _ => {}
+                        }
+                    }
+                }
             }
         }
 
