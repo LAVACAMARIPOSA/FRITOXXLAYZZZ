@@ -25,12 +25,13 @@ jobs:
       - name: Build release binary
         run: cargo build --release
 
-      - name: Prepare deploy package
+      - name: Prepare and push to HuggingFace
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          mkdir -p deploy/src deploy/data
-          cp target/release/solana-zero-capital-beast deploy/bot
-          # Simple Dockerfile that just copies the prebuilt binary
-          cat > deploy/Dockerfile << 'DEOF'
+          mkdir deploy && cd deploy
+          cp ../target/release/solana-zero-capital-beast bot
+          cat > Dockerfile <<'EOF'
           FROM debian:bookworm-slim
           RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
           COPY bot /app/bot
@@ -38,9 +39,8 @@ jobs:
           WORKDIR /app
           EXPOSE 7860
           CMD ["./bot"]
-          DEOF
-          # HF Space README with metadata
-          cat > deploy/README.md << 'REOF'
+          EOF
+          cat > README.md <<'EOF'
           ---
           title: FRITOXXLAYZZZ
           emoji: "⚡"
@@ -51,17 +51,10 @@ jobs:
           pinned: false
           ---
           # Solana Zero-Capital Beast v2.0
-          Autonomous DeFi agent with persistent memory.
-          REOF
-
-      - name: Push to HuggingFace Space
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: |
-          cd deploy
-          git init
-          git config user.name "GitHub Actions"
-          git config user.email "actions@github.com"
+          EOF
+          git init -b main
+          git config user.name "CI"
+          git config user.email "ci@bot"
           git add -A
-          git commit -m "Deploy build ${{ github.sha }}"
+          git commit -m "deploy ${{ github.sha }}"
           git push --force https://Xxvelonxx:${HF_TOKEN}@huggingface.co/spaces/Xxvelonxx/FRITOXXLAYZZZ main
