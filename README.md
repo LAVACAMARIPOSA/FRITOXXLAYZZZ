@@ -6,6 +6,8 @@ Bot de arbitrage y liquidaciones en Solana preparado para correr como worker en 
 
 Este repo incluye `render.yaml` para crear un worker de Render.
 
+Checklist express en: `RENDER_DEPLOY_CHECKLIST.md`.
+
 Pasos exactos en Render:
 
 1. Entra a Render y elige `New +`.
