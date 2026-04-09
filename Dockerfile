@@ -5,6 +5,10 @@ COPY Cargo.toml Cargo.lock ./
 RUN mkdir src && echo "fn main() {}" > src/main.rs && cargo build --release 2>/dev/null || true
 RUN rm -rf src
 COPY src/ src/
+# Use single codegen unit and no LTO to reduce memory usage during build
+ENV CARGO_PROFILE_RELEASE_LTO=false
+ENV CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
+ENV CARGO_PROFILE_RELEASE_OPT_LEVEL=2
 RUN cargo build --release
 
 FROM debian:bookworm-slim
