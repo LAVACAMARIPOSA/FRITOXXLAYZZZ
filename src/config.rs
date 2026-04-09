@@ -11,7 +11,7 @@ pub const JITO_BLOCK_ENGINE_GRPC: &str = "mainnet.block-engine.jito.wtf:443";
 
 // Feature flags
 pub const DRY_RUN: bool = true;
-pub const MIN_PROFIT_USD: f64 = 0.8;
+pub const MIN_PROFIT_USD: f64 = 0.10;
 
 // Bundle configuration
 pub const BUNDLE_TIMEOUT_SECS: u64 = 30;

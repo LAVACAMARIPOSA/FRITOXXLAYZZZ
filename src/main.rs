@@ -178,18 +178,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     cycle, agent_memory.risk_level, agent_memory.total_profit_usd));
             }
 
-            // STRATEGY 1: Arbitrage
+            // STRATEGY 1: Multi-pair Arbitrage (round-trip)
             let flash_amount = strategy.get_flash_amount(&agent_memory);
 
-            match jupiter::get_best_jupiter_quote(
-                flash_loan::USDC_MINT, flash_loan::SOL_MINT, flash_amount
-            ).await {
-                Some(profit) => {
+            match jupiter::scan_arbitrage_opportunities(flash_loan::USDC_MINT, flash_amount).await {
+                Some((profit, route)) => {
                     let decision = strategy.evaluate_arbitrage(&agent_memory, profit, 0.5);
                     if let Action::Go = decision.action {
                         agent_memory.total_opportunities += 1;
                         telegram.notify_opportunity("Arbitrage", profit,
-                            &format!("USDC->SOL | Confianza: {:.0}%", decision.confidence * 100.0)).await;
+                            &format!("{} | Confianza: {:.0}%", route, decision.confidence * 100.0)).await;
 
                         match flash_loan::build_flash_loan_tx(&client, &keypair, flash_amount).await {
                             Ok(Some(tx)) => {
@@ -200,7 +198,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 agent_memory.record_opportunity(OpportunityRecord {
                                     timestamp: memory::current_timestamp(),
                                     strategy: "arbitrage".into(),
-                                    route: "USDC->SOL->USDC".into(),
+                                    route: route.clone(),
                                     estimated_profit_usd: profit,
                                     actual_profit_usd: if success && !config::DRY_RUN { profit } else { 0.0 },
                                     success,

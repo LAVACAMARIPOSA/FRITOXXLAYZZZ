@@ -256,50 +256,102 @@ impl Default for SlippageConfig {
 // FUNCIONES PÚBLICAS
 // =============================================================================
 
-/// Obtiene el mejor quote de Jupiter para un par de tokens
-/// 
-/// # Arguments
-/// * `input_mint` - Mint del token de entrada
-/// * `output_mint` - Mint del token de salida
-/// * `amount` - Cantidad de tokens de entrada (en unidades base)
-/// 
-/// # Returns
-/// * `Option<f64>` - Profit potencial en USD, o None si no hay ruta rentable
+/// Busca oportunidades de arbitrage haciendo un round-trip:
+/// USDC -> intermediate_token -> USDC
+///
+/// Compara lo que sale al final vs lo que entró (ambos en USDC).
+/// Si hay profit después de fees, retorna el profit en USD.
 pub async fn get_best_jupiter_quote(
     input_mint: &str,
     output_mint: &str,
     amount: u64,
 ) -> Option<f64> {
     let slippage_config = SlippageConfig::default();
-    
-    match get_jupiter_quote_with_slippage(
-        input_mint,
-        output_mint,
-        amount,
-        &slippage_config,
+
+    // Leg 1: USDC -> intermediate (e.g. SOL)
+    let quote_leg1 = match get_jupiter_quote_with_slippage(
+        input_mint, output_mint, amount, &slippage_config,
     ).await {
-        Ok(quote) => {
-            let in_amount = quote.in_amount.parse::<u64>().unwrap_or(0) as f64;
-            let out_amount = quote.out_amount.parse::<u64>().unwrap_or(0) as f64;
-            
-            // Calcular profit (asumiendo 6 decimales para USDC)
-            let profit = (out_amount - in_amount) / 1_000_000.0;
-            
-            if profit > config::MIN_PROFIT_USD {
-                utils::log_success(&format!(
-                    "💰 Mejor ruta Jupiter: +${:.2} (impacto: {}%)",
-                    profit,
-                    quote.price_impact_pct
-                ));
-                return Some(profit);
-            }
-            None
-        }
+        Ok(q) => q,
         Err(e) => {
-            utils::log_error(&format!("Error obteniendo quote: {}", e));
-            None
+            utils::log_error(&format!("Quote leg1 error: {}", e));
+            return None;
+        }
+    };
+
+    let intermediate_amount = quote_leg1.out_amount.parse::<u64>().unwrap_or(0);
+    if intermediate_amount == 0 {
+        return None;
+    }
+
+    // Leg 2: intermediate -> USDC (back to start)
+    let quote_leg2 = match get_jupiter_quote_with_slippage(
+        output_mint, input_mint, intermediate_amount, &slippage_config,
+    ).await {
+        Ok(q) => q,
+        Err(e) => {
+            utils::log_error(&format!("Quote leg2 error: {}", e));
+            return None;
+        }
+    };
+
+    let final_amount = quote_leg2.out_amount.parse::<u64>().unwrap_or(0);
+
+    // Profit = what we got back - what we started with (both in USDC, 6 decimals)
+    // Also subtract flash loan fee (0.09% of amount)
+    let flash_fee = amount * 9 / 10_000; // 0.09%
+    let total_cost = amount + flash_fee;
+
+    if final_amount <= total_cost {
+        return None;
+    }
+
+    let profit_raw = final_amount - total_cost;
+    let profit_usd = profit_raw as f64 / 1_000_000.0; // USDC has 6 decimals
+
+    if profit_usd > config::MIN_PROFIT_USD {
+        let impact1 = &quote_leg1.price_impact_pct;
+        let impact2 = &quote_leg2.price_impact_pct;
+        utils::log_success(&format!(
+            "Arbitrage round-trip: ${:.4} profit (impacts: {}% / {}%)",
+            profit_usd, impact1, impact2
+        ));
+        return Some(profit_usd);
+    }
+
+    None
+}
+
+/// Busca arbitrage en múltiples pares simultáneamente.
+/// Retorna el mejor profit encontrado y la ruta.
+pub async fn scan_arbitrage_opportunities(
+    base_mint: &str,
+    amount: u64,
+) -> Option<(f64, String)> {
+    // Tokens intermedios para buscar arbitrage
+    let intermediates = vec![
+        ("So11111111111111111111111111111111111111112", "SOL"),
+        ("mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So", "mSOL"),
+        ("J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn", "jitoSOL"),
+        ("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", "USDT"),
+        ("bSo13r4TkiE4KumL71LsHTPpL2euBYLFx6h9HP3piy1", "bSOL"),
+        ("DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263", "BONK"),
+    ];
+
+    let mut best_profit: Option<(f64, String)> = None;
+
+    for (mint, symbol) in &intermediates {
+        if let Some(profit) = get_best_jupiter_quote(base_mint, mint, amount).await {
+            let route = format!("USDC->{}->USDC", symbol);
+            utils::log_success(&format!("Oportunidad {}: +${:.4}", route, profit));
+            match &best_profit {
+                Some((best, _)) if profit <= *best => {}
+                _ => { best_profit = Some((profit, route)); }
+            }
         }
     }
+
+    best_profit
 }
 
 /// Obtiene un quote detallado de Jupiter con slippage configurable
