@@ -3,4 +3,6 @@ keypair.json
 *.zip
 .DS_Store
 .env
-.tmp/
+.tmp/keypair.json
+data/
+examples/

@@ -1,4 +1,14 @@
-# Solana Zero-Capital Beast v1.0
+---
+title: FRITOXXLAYZZZ
+emoji: "⚡"
+colorFrom: purple
+colorTo: blue
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
+# Solana Zero-Capital Beast v2.0
 
 Bot de Flash Loans + Arbitrage + Liquidaciones usando Kamino Lending + Jupiter Swaps + Jito Bundles.
 
