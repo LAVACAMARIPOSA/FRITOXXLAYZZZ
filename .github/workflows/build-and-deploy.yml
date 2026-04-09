@@ -25,12 +25,21 @@ jobs:
       - name: Build release binary
         run: cargo build --release
 
-      - name: Prepare and push to HuggingFace
+      - name: Deploy to HuggingFace Space
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           mkdir deploy && cd deploy
+
+          # Init git with LFS for binary files
+          git init -b main
+          git lfs install
+          git lfs track "bot"
+
+          # Copy binary
           cp ../target/release/solana-zero-capital-beast bot
+
+          # Minimal Dockerfile (no compilation needed)
           cat > Dockerfile <<'EOF'
           FROM debian:bookworm-slim
           RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
@@ -40,6 +49,8 @@ jobs:
           EXPOSE 7860
           CMD ["./bot"]
           EOF
+
+          # HF Space metadata
           cat > README.md <<'EOF'
           ---
           title: FRITOXXLAYZZZ
@@ -52,7 +63,7 @@ jobs:
           ---
           # Solana Zero-Capital Beast v2.0
           EOF
-          git init -b main
+
           git config user.name "CI"
           git config user.email "ci@bot"
           git add -A
