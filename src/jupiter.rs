@@ -322,36 +322,255 @@ pub async fn get_best_jupiter_quote(
     None
 }
 
+// =============================================================================
+// TOKEN REGISTRY
+// =============================================================================
+
+pub const SOL_MINT: &str = "So11111111111111111111111111111111111111112";
+pub const MSOL_MINT: &str = "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So";
+pub const JITOSOL_MINT: &str = "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn";
+pub const USDT_MINT: &str = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB";
+pub const BSOL_MINT: &str = "bSo13r4TkiE4KumL71LsHTPpL2euBYLFx6h9HP3piy1";
+pub const BONK_MINT: &str = "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263";
+pub const USDC_MINT: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+pub const RAY_MINT: &str = "4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R";
+pub const ORCA_MINT: &str = "orcaEKTdK7LKz57vaAYr9QeNsVEPfiu6QeMU1kektZE";
+pub const PYTH_MINT: &str = "HZ1JovNiVvGrGNiiYvEozEVgZ58xaU3RKwX8eACQBCt3";
+pub const WIF_MINT: &str = "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm";
+pub const JUP_MINT: &str = "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN";
+
+// =============================================================================
+// STRATEGY: ROUND-TRIP ARBITRAGE (A -> B -> A)
+// =============================================================================
+
 /// Busca arbitrage en múltiples pares simultáneamente.
 /// Retorna el mejor profit encontrado y la ruta.
 pub async fn scan_arbitrage_opportunities(
     base_mint: &str,
     amount: u64,
 ) -> Option<(f64, String)> {
-    // Tokens intermedios para buscar arbitrage
-    let intermediates = vec![
-        ("So11111111111111111111111111111111111111112", "SOL"),
-        ("mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So", "mSOL"),
-        ("J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn", "jitoSOL"),
-        ("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", "USDT"),
-        ("bSo13r4TkiE4KumL71LsHTPpL2euBYLFx6h9HP3piy1", "bSOL"),
-        ("DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263", "BONK"),
+    let intermediates: Vec<(&str, &str)> = vec![
+        (SOL_MINT, "SOL"),
+        (MSOL_MINT, "mSOL"),
+        (JITOSOL_MINT, "jitoSOL"),
+        (USDT_MINT, "USDT"),
+        (BSOL_MINT, "bSOL"),
+        (BONK_MINT, "BONK"),
+        (RAY_MINT, "RAY"),
+        (WIF_MINT, "WIF"),
+        (JUP_MINT, "JUP"),
     ];
 
-    let mut best_profit: Option<(f64, String)> = None;
+    let mut best: Option<(f64, String)> = None;
 
     for (mint, symbol) in &intermediates {
         if let Some(profit) = get_best_jupiter_quote(base_mint, mint, amount).await {
             let route = format!("USDC->{}->USDC", symbol);
-            utils::log_success(&format!("Oportunidad {}: +${:.4}", route, profit));
-            match &best_profit {
-                Some((best, _)) if profit <= *best => {}
-                _ => { best_profit = Some((profit, route)); }
+            utils::log_info(&format!("  {} = +${:.4}", route, profit));
+            match &best {
+                Some((b, _)) if profit <= *b => {}
+                _ => { best = Some((profit, route)); }
             }
         }
     }
 
-    best_profit
+    best
+}
+
+// =============================================================================
+// STRATEGY: TRIANGULAR ARBITRAGE (A -> B -> C -> A)
+// =============================================================================
+
+/// Triangular arbitrage: USDC -> token1 -> token2 -> USDC
+/// Tries multiple 3-hop paths to find price inefficiencies.
+pub async fn scan_triangular_arbitrage(amount: u64) -> Option<(f64, String)> {
+    let slippage = SlippageConfig::default();
+
+    // Promising triangular routes
+    let triangles: Vec<(&str, &str, &str, &str)> = vec![
+        (SOL_MINT, MSOL_MINT, "SOL", "mSOL"),
+        (SOL_MINT, JITOSOL_MINT, "SOL", "jitoSOL"),
+        (SOL_MINT, BSOL_MINT, "SOL", "bSOL"),
+        (MSOL_MINT, JITOSOL_MINT, "mSOL", "jitoSOL"),
+        (SOL_MINT, BONK_MINT, "SOL", "BONK"),
+        (SOL_MINT, WIF_MINT, "SOL", "WIF"),
+        (SOL_MINT, JUP_MINT, "SOL", "JUP"),
+    ];
+
+    let mut best: Option<(f64, String)> = None;
+    let flash_fee = amount * 9 / 10_000;
+
+    for (mid1, mid2, sym1, sym2) in &triangles {
+        // Leg 1: USDC -> mid1
+        let q1 = match get_jupiter_quote_with_slippage(USDC_MINT, mid1, amount, &slippage).await {
+            Ok(q) => q, Err(_) => continue,
+        };
+        let amt1 = q1.out_amount.parse::<u64>().unwrap_or(0);
+        if amt1 == 0 { continue; }
+
+        // Leg 2: mid1 -> mid2
+        let q2 = match get_jupiter_quote_with_slippage(mid1, mid2, amt1, &slippage).await {
+            Ok(q) => q, Err(_) => continue,
+        };
+        let amt2 = q2.out_amount.parse::<u64>().unwrap_or(0);
+        if amt2 == 0 { continue; }
+
+        // Leg 3: mid2 -> USDC
+        let q3 = match get_jupiter_quote_with_slippage(mid2, USDC_MINT, amt2, &slippage).await {
+            Ok(q) => q, Err(_) => continue,
+        };
+        let final_amt = q3.out_amount.parse::<u64>().unwrap_or(0);
+
+        let total_cost = amount + flash_fee;
+        if final_amt > total_cost {
+            let profit = (final_amt - total_cost) as f64 / 1_000_000.0;
+            let route = format!("USDC->{}->{}->USDC", sym1, sym2);
+            utils::log_info(&format!("  triangular {} = +${:.4}", route, profit));
+            match &best {
+                Some((b, _)) if profit <= *b => {}
+                _ => { best = Some((profit, route)); }
+            }
+        }
+    }
+
+    best
+}
+
+// =============================================================================
+// STRATEGY: STABLECOIN DEPEG ARBITRAGE
+// =============================================================================
+
+/// Detects USDC/USDT price deviations.
+/// When stablecoins depeg even slightly, there's profit in the spread.
+pub async fn scan_stablecoin_arb(amount: u64) -> Option<(f64, String)> {
+    let slippage = SlippageConfig::default();
+    let flash_fee = amount * 9 / 10_000;
+
+    // USDC -> USDT -> USDC
+    let q1 = match get_jupiter_quote_with_slippage(USDC_MINT, USDT_MINT, amount, &slippage).await {
+        Ok(q) => q, Err(_) => return None,
+    };
+    let usdt_amount = q1.out_amount.parse::<u64>().unwrap_or(0);
+    if usdt_amount == 0 { return None; }
+
+    let q2 = match get_jupiter_quote_with_slippage(USDT_MINT, USDC_MINT, usdt_amount, &slippage).await {
+        Ok(q) => q, Err(_) => return None,
+    };
+    let final_usdc = q2.out_amount.parse::<u64>().unwrap_or(0);
+
+    let total_cost = amount + flash_fee;
+    if final_usdc > total_cost {
+        let profit = (final_usdc - total_cost) as f64 / 1_000_000.0;
+        if profit > 0.01 { // Even tiny stablecoin profits count
+            return Some((profit, "USDC->USDT->USDC (depeg)".to_string()));
+        }
+    }
+
+    None
+}
+
+// =============================================================================
+// STRATEGY: LST PREMIUM ARBITRAGE
+// =============================================================================
+
+/// Liquid Staking Token premium detection.
+/// mSOL/jitoSOL/bSOL should trade at ~1:1 with SOL but sometimes have premiums.
+/// Route: USDC -> SOL -> LST -> USDC (exploiting LST premium/discount)
+pub async fn scan_lst_premium(amount: u64) -> Option<(f64, String)> {
+    let slippage = SlippageConfig::default();
+    let flash_fee = amount * 9 / 10_000;
+
+    let lst_tokens: Vec<(&str, &str)> = vec![
+        (MSOL_MINT, "mSOL"),
+        (JITOSOL_MINT, "jitoSOL"),
+        (BSOL_MINT, "bSOL"),
+    ];
+
+    let mut best: Option<(f64, String)> = None;
+
+    for (lst_mint, symbol) in &lst_tokens {
+        // Direction 1: USDC -> LST -> SOL -> USDC
+        let q1 = match get_jupiter_quote_with_slippage(USDC_MINT, lst_mint, amount, &slippage).await {
+            Ok(q) => q, Err(_) => continue,
+        };
+        let lst_amt = q1.out_amount.parse::<u64>().unwrap_or(0);
+        if lst_amt == 0 { continue; }
+
+        let q2 = match get_jupiter_quote_with_slippage(lst_mint, SOL_MINT, lst_amt, &slippage).await {
+            Ok(q) => q, Err(_) => continue,
+        };
+        let sol_amt = q2.out_amount.parse::<u64>().unwrap_or(0);
+        if sol_amt == 0 { continue; }
+
+        let q3 = match get_jupiter_quote_with_slippage(SOL_MINT, USDC_MINT, sol_amt, &slippage).await {
+            Ok(q) => q, Err(_) => continue,
+        };
+        let final_usdc = q3.out_amount.parse::<u64>().unwrap_or(0);
+
+        let total_cost = amount + flash_fee;
+        if final_usdc > total_cost {
+            let profit = (final_usdc - total_cost) as f64 / 1_000_000.0;
+            let route = format!("USDC->{}->SOL->USDC (LST premium)", symbol);
+            match &best {
+                Some((b, _)) if profit <= *b => {}
+                _ => { best = Some((profit, route)); }
+            }
+        }
+    }
+
+    best
+}
+
+// =============================================================================
+// MASTER SCANNER: ALL STRATEGIES
+// =============================================================================
+
+/// Runs ALL arbitrage strategies and returns the single best opportunity.
+pub async fn scan_all_strategies(amount: u64) -> Option<(f64, String)> {
+    utils::log_info("Escaneando estrategias...");
+
+    let mut best: Option<(f64, String)> = None;
+
+    // Strategy 1: Simple round-trip (9 pairs)
+    if let Some((p, r)) = scan_arbitrage_opportunities(USDC_MINT, amount).await {
+        utils::log_success(&format!("  [round-trip] {} = +${:.4}", r, p));
+        best = Some((p, r));
+    }
+
+    // Strategy 2: Triangular (7 paths)
+    if let Some((p, r)) = scan_triangular_arbitrage(amount).await {
+        utils::log_success(&format!("  [triangular] {} = +${:.4}", r, p));
+        match &best {
+            Some((b, _)) if p <= *b => {}
+            _ => { best = Some((p, r)); }
+        }
+    }
+
+    // Strategy 3: Stablecoin depeg
+    if let Some((p, r)) = scan_stablecoin_arb(amount).await {
+        utils::log_success(&format!("  [stablecoin] {} = +${:.4}", r, p));
+        match &best {
+            Some((b, _)) if p <= *b => {}
+            _ => { best = Some((p, r)); }
+        }
+    }
+
+    // Strategy 4: LST premium
+    if let Some((p, r)) = scan_lst_premium(amount).await {
+        utils::log_success(&format!("  [LST] {} = +${:.4}", r, p));
+        match &best {
+            Some((b, _)) if p <= *b => {}
+            _ => { best = Some((p, r)); }
+        }
+    }
+
+    if let Some((p, ref r)) = best {
+        utils::log_success(&format!("MEJOR: {} = +${:.4}", r, p));
+    } else {
+        utils::log_info("  Ninguna estrategia rentable este ciclo");
+    }
+
+    best
 }
 
 /// Obtiene un quote detallado de Jupiter con slippage configurable

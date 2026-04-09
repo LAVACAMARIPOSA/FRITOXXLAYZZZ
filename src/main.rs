@@ -178,10 +178,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     cycle, agent_memory.risk_level, agent_memory.total_profit_usd));
             }
 
-            // STRATEGY 1: Multi-pair Arbitrage (round-trip)
+            // STRATEGY 1: ALL arbitrage strategies (round-trip, triangular, stablecoin, LST)
             let flash_amount = strategy.get_flash_amount(&agent_memory);
 
-            match jupiter::scan_arbitrage_opportunities(flash_loan::USDC_MINT, flash_amount).await {
+            match jupiter::scan_all_strategies(flash_amount).await {
                 Some((profit, route)) => {
                     let decision = strategy.evaluate_arbitrage(&agent_memory, profit, 0.5);
                     if let Action::Go = decision.action {
