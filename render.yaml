@@ -12,5 +12,3 @@ services:
         sync: false
       - key: SOLANA_KEYPAIR_JSON
         sync: false
-      - key: KEYPAIR_PATH
-        value: keypair.json
