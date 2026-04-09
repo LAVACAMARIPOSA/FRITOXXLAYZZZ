@@ -3,11 +3,10 @@ use solana_sdk::{
     commitment_config::CommitmentConfig,
     pubkey::Pubkey,
 };
-use anchor_lang::AccountDeserialize;
+use borsh::BorshDeserialize;
 use std::str::FromStr;
 
 use crate::utils;
-use crate::config;
 
 /// Program ID de Kamino Lending
 pub const KAMINO_PROGRAM_ID: &str = "KLend2g3cP87fffoy8q1mQqGKjrxjC8boSyAYavgmjD";
@@ -85,7 +84,7 @@ pub struct BorrowPosition {
 }
 
 /// Estructura LastUpdate de Kamino
-#[derive(Debug, Clone, Copy, Default, PartialEq, AnchorDeserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, BorshDeserialize)]
 pub struct LastUpdate {
     pub slot: u64,
     pub stale: u8,
@@ -93,7 +92,7 @@ pub struct LastUpdate {
 }
 
 /// Estructura ObligationCollateral de Kamino
-#[derive(Debug, Clone, Copy, Default, PartialEq, AnchorDeserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, BorshDeserialize)]
 pub struct ObligationCollateral {
     pub deposit_reserve: Pubkey,
     pub deposited_amount: u64,
@@ -103,14 +102,14 @@ pub struct ObligationCollateral {
 }
 
 /// Estructura BigFractionBytes para campos BSF
-#[derive(Debug, Clone, Copy, Default, PartialEq, AnchorDeserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, BorshDeserialize)]
 pub struct BigFractionBytes {
     pub value: u128,
     pub padding: u64,
 }
 
 /// Estructura ObligationLiquidity de Kamino
-#[derive(Debug, Clone, Copy, Default, PartialEq, AnchorDeserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, BorshDeserialize)]
 pub struct ObligationLiquidity {
     pub borrow_reserve: Pubkey,
     pub cumulative_borrow_rate_bsf: BigFractionBytes,
@@ -123,7 +122,7 @@ pub struct ObligationLiquidity {
 }
 
 /// Estructura ObligationOrder de Kamino
-#[derive(Debug, Clone, Copy, Default, PartialEq, AnchorDeserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, BorshDeserialize)]
 pub struct ObligationOrder {
     pub threshold_value: u128,
     pub opportunity: u128,
@@ -135,7 +134,7 @@ pub struct ObligationOrder {
 }
 
 /// Estructura BorrowOrder de Kamino
-#[derive(Debug, Clone, Copy, Default, PartialEq, AnchorDeserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, BorshDeserialize)]
 pub struct BorrowOrder {
     pub borrow_mint: Pubkey,
     pub remaining_amount: u64,
@@ -152,7 +151,7 @@ pub struct BorrowOrder {
 
 /// Estructura principal Obligation de Kamino Lending
 /// Basada en: https://docs.kamino.finance/klend/reference/accounts/obligation
-#[derive(Debug, Clone, Copy, AnchorDeserialize)]
+#[derive(Debug, Clone, Copy, BorshDeserialize)]
 pub struct Obligation {
     pub tag: u64,
     pub last_update: LastUpdate,
@@ -332,7 +331,7 @@ async fn get_all_obligations(
             ),
         ]),
         account_config: solana_client::rpc_config::RpcAccountInfoConfig {
-            encoding: Some(solana_sdk::account::UiAccountEncoding::Base64),
+            encoding: Some(solana_account_decoder::UiAccountEncoding::Base64),
             commitment: Some(CommitmentConfig::confirmed()),
             ..Default::default()
         },
@@ -372,11 +371,11 @@ fn try_deserialize_obligation(data: &[u8]) -> Result<Obligation, Box<dyn std::er
     if data.len() < OBLIGATION_SIZE {
         return Err("Datos de cuenta insuficientes".into());
     }
-    
-    // Usar anchor_lang para deserializar
-    let mut data_slice: &[u8] = data;
-    let obligation = Obligation::try_deserialize(&mut data_slice)?;
-    
+
+    // Skip 8-byte discriminator, then deserialize with borsh
+    let data_after_discriminator = &data[8..];
+    let obligation = Obligation::try_from_slice(data_after_discriminator)?;
+
     Ok(obligation)
 }
 
@@ -486,7 +485,7 @@ fn obligation_to_opportunity(
 
 /// Obtiene información de reserves necesarios para las obligaciones
 async fn fetch_reserve_info(
-    client: &RpcClient,
+    _client: &RpcClient,
     obligations: &[(Pubkey, Obligation)],
 ) -> Result<ReserveCache, Box<dyn std::error::Error + Send + Sync>> {
     let mut cache = ReserveCache::new();

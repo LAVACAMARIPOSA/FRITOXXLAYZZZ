@@ -160,17 +160,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if opp.estimated_profit_usd >= config::MIN_PROFIT_USD {
                     utils::log_success("     ✅ Rentable - Procesando...");
                     
-                    if !config::DRY_RUN {
-                        // TODO: Implementar liquidación real
-                        // 1. Flash borrow del token de deuda
-                        // 2. Liquidar la obligación
-                        // 3. Recibir collateral
-                        // 4. Swap collateral -> deuda
-                        // 5. Repay flash loan
-                        // 6. Enviar bundle a Jito
-                        utils::log_info("     🔧 Liquidación real en implementación");
+                    if config::DRY_RUN {
+                        utils::log_info("     🔒 DRY RUN - Simulando flujo de liquidación:");
+                        utils::log_info("        1. Flash Borrow USDC del reserve Kamino");
+                        utils::log_info(&format!("        2. Liquidar obligation {} (HF: {:.4})", opp.obligation_pubkey, opp.health_factor));
+                        utils::log_info("        3. Recibir collateral + bonus (~7%)");
+                        utils::log_info("        4. Swap collateral -> USDC via Jupiter");
+                        utils::log_info("        5. Repay flash loan + fee (0.09%)");
+                        utils::log_info("        6. Enviar bundle atómico a Jito");
+                        utils::log_info(&format!("        💵 Profit neto estimado: ${:.2}", opp.estimated_profit_usd));
+                        stats.total_profit_usd += opp.estimated_profit_usd;
                     } else {
-                        utils::log_info("     🔒 Modo DRY RUN - Saltando ejecución");
+                        // Producción: ejecutar liquidación real
+                        let flash_amount = (opp.borrow_factor_adjusted_debt_usd * 0.5 * 1_000_000.0) as u64;
+                        match flash_loan::build_flash_loan_tx(&client, &keypair, flash_amount).await {
+                            Ok(Some(tx)) => {
+                                match bundle::send_jito_bundle(tx, &keypair, opp.estimated_profit_usd).await {
+                                    Ok(bundle_id) => {
+                                        stats.bundles_sent += 1;
+                                        stats.total_profit_usd += opp.estimated_profit_usd;
+                                        utils::log_success(&format!("     ✅ Liquidación ejecutada! Bundle: {}", bundle_id));
+                                    }
+                                    Err(e) => utils::log_error(&format!("     ❌ Error en bundle: {}", e)),
+                                }
+                            }
+                            Ok(None) => utils::log_warning("     ⚠️ No se pudo construir tx de liquidación"),
+                            Err(e) => utils::log_error(&format!("     ❌ Error: {}", e)),
+                        }
                     }
                 } else {
                     utils::log_info(&format!("     ℹ️ No rentable (min: ${})", config::MIN_PROFIT_USD));

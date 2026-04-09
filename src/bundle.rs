@@ -195,9 +195,10 @@ fn generate_bundle_uuid() -> String {
 
 /// Serialize transaction to base64
 fn serialize_transaction_to_base64(tx: &VersionedTransaction) -> Result<String, JitoBundleError> {
+    use base64::{Engine as _, engine::general_purpose};
     let serialized = bincode::serialize(tx)
         .map_err(|e| JitoBundleError::SerializationError(e.to_string()))?;
-    Ok(base64::encode(serialized))
+    Ok(general_purpose::STANDARD.encode(&serialized))
 }
 
 // =============================================================================
@@ -699,7 +700,7 @@ pub async fn send_jito_bundle(
 /// Send a bundle with custom transactions (advanced usage)
 pub async fn send_custom_bundle(
     transactions: Vec<VersionedTransaction>,
-    keypair: &Keypair,
+    _keypair: &Keypair,
     estimated_profit_lamports: u64,
 ) -> Result<BundleResult, JitoBundleError> {
     let rpc_client = Arc::new(RpcClient::new(config::get_rpc_url()));

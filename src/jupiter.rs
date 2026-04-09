@@ -8,8 +8,6 @@ use solana_sdk::{
     signer::Signer,
     transaction::VersionedTransaction,
 };
-use std::str::FromStr;
-
 use crate::{config, utils};
 
 /// Base URL para la API de Jupiter v6
@@ -26,7 +24,7 @@ const RETRY_DELAY_MS: u64 = 500;
 // =============================================================================
 
 /// Respuesta de la API de quote de Jupiter
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JupiterQuoteResponse {
     /// Input mint
     #[serde(rename = "inputMint")]
@@ -67,7 +65,7 @@ pub struct JupiterQuoteResponse {
 }
 
 /// Fee de plataforma
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlatformFee {
     #[serde(rename = "amount")]
     pub amount: String,
@@ -76,7 +74,7 @@ pub struct PlatformFee {
 }
 
 /// Paso en la ruta de swap
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteStep {
     #[serde(rename = "swapInfo")]
     pub swap_info: SwapInfo,
@@ -84,7 +82,7 @@ pub struct RouteStep {
 }
 
 /// Información del swap
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SwapInfo {
     #[serde(rename = "ammKey")]
     pub amm_key: String,
@@ -517,8 +515,11 @@ pub async fn build_jupiter_instructions(
                             }
                             
                             // Decodificar la transacción
-                            let tx_bytes = base64::decode(&swap_response.swap_transaction)
-                                .map_err(|e| format!("Error decodificando base64: {}", e))?;
+                            let tx_bytes = {
+                                use base64::{Engine as _, engine::general_purpose};
+                                general_purpose::STANDARD.decode(&swap_response.swap_transaction)
+                                    .map_err(|e| format!("Error decodificando base64: {}", e))?
+                            };
                             
                             let versioned_tx: VersionedTransaction = 
                                 bincode::deserialize(&tx_bytes)
@@ -535,7 +536,7 @@ pub async fn build_jupiter_instructions(
                             return Ok(JupiterSwapInstructions {
                                 instructions,
                                 account_keys: versioned_tx.message.static_account_keys().to_vec(),
-                                blockhash: versioned_tx.message.recent_blockhash(),
+                                blockhash: *versioned_tx.message.recent_blockhash(),
                                 last_valid_block_height: swap_response.last_valid_block_height,
                             });
                         }
@@ -660,8 +661,9 @@ fn decode_and_sign_transaction(
     base64_tx: &str,
     keypair: &Keypair,
 ) -> Result<VersionedTransaction, String> {
+    use base64::{Engine as _, engine::general_purpose};
     // Decodificar base64
-    let tx_bytes = base64::decode(base64_tx)
+    let tx_bytes = general_purpose::STANDARD.decode(base64_tx)
         .map_err(|e| format!("Error decodificando base64: {}", e))?;
     
     // Deserializar transacción
@@ -702,7 +704,7 @@ fn extract_instructions_from_versioned_tx(
             .filter_map(|&idx| {
                 account_keys.get(idx as usize).map(|&pubkey| {
                     let is_signer = tx.message.is_signer(idx as usize);
-                    let is_writable = tx.message.is_maybe_writable(idx as usize);
+                    let is_writable = tx.message.is_maybe_writable(idx as usize, None);
                     
                     if is_writable {
                         AccountMeta::new(pubkey, is_signer)
@@ -751,45 +753,6 @@ pub fn get_price_impact(quote: &JupiterQuoteResponse) -> f64 {
 }
 
 // =============================================================================
-// MÓDULO BASE64 (implementación simple para no depender de crate externo)
-// =============================================================================
-
-mod base64 {
-    /// Decodifica una string base64
-    pub fn decode(input: &str) -> Result<Vec<u8>, String> {
-        use std::collections::HashMap;
-        
-        let alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let char_to_val: HashMap<char, u8> = alphabet
-            .chars()
-            .enumerate()
-            .map(|(i, c)| (c, i as u8))
-            .collect();
-        
-        let mut result = Vec::new();
-        let mut buffer = 0u32;
-        let mut bits_collected = 0u8;
-        
-        for c in input.chars() {
-            if c == '=' {
-                break;
-            }
-            
-            let val = char_to_val.get(&c).ok_or("Carácter base64 inválido")?;
-            buffer = (buffer << 6) | (*val as u32);
-            bits_collected += 6;
-            
-            if bits_collected >= 8 {
-                bits_collected -= 8;
-                result.push(((buffer >> bits_collected) & 0xFF) as u8);
-            }
-        }
-        
-        Ok(result)
-    }
-}
-
-// =============================================================================
 // TESTS
 // =============================================================================
 
@@ -823,8 +786,9 @@ mod tests {
 
     #[test]
     fn test_base64_decode() {
+        use base64::{Engine as _, engine::general_purpose};
         let encoded = "SGVsbG8gV29ybGQ="; // "Hello World"
-        let decoded = base64::decode(encoded).unwrap();
+        let decoded = general_purpose::STANDARD.decode(encoded).unwrap();
         assert_eq!(String::from_utf8(decoded).unwrap(), "Hello World");
     }
 

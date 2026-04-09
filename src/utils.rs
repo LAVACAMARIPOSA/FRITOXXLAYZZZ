@@ -9,7 +9,7 @@ pub fn load_keypair() -> Keypair {
         if bytes.len() != 64 {
             panic!("❌ Keypair invalido: debe tener exactamente 64 bytes");
         }
-        Keypair::from_bytes(&bytes).expect("❌ Error creando Keypair desde JSON")
+        Keypair::try_from(bytes.as_slice()).expect("❌ Error creando Keypair desde JSON")
     }
     // Fallback local
     else {
@@ -18,7 +18,7 @@ pub fn load_keypair() -> Keypair {
             let bytes: Vec<u8> = std::fs::read(path).expect("Error leyendo keypair.json");
             let bytes: Vec<u8> =
                 serde_json::from_slice(&bytes).expect("Error parseando keypair.json");
-            Keypair::from_bytes(&bytes).expect("Error creando Keypair")
+            Keypair::try_from(bytes.as_slice()).expect("Error creando Keypair")
         } else {
             panic!("❌ Define SOLANA_KEYPAIR_JSON en Render o crea keypair.json localmente");
         }

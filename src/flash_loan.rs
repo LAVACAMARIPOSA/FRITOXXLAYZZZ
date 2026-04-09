@@ -9,8 +9,6 @@ use solana_sdk::{
     sysvar,
 };
 use std::str::FromStr;
-use anchor_lang::prelude::*;
-use anchor_lang::solana_program::program::invoke;
 use borsh::{BorshSerialize, BorshDeserialize};
 
 use crate::{config, utils};
@@ -25,10 +23,10 @@ pub const TOKEN_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 pub const TOKEN_2022_PROGRAM_ID: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 
 /// Main Lending Market (Kamino Main Market)
-pub const MAIN_LENDING_MARKET: &str = "7u3HeHxYDLhnCoErrtycNokbQYbWGzLs6JSDqGAv6PfF";
+pub const MAIN_LENDING_MARKET: &str = "7u3HeHxYDLhnCoErrtycNokbQYbWGzLs6JSDqGAv5PfF";
 
-/// USDC Reserve en Kamino Main Market
-pub const USDC_RESERVE: &str = "7u3HeHxYDLhnCoErrtycNokbQYbWGzLs6JSDqGAv6PfF";
+/// USDC Reserve en Kamino Main Market (real mainnet address)
+pub const USDC_RESERVE: &str = "D6q6wuQSrifJKZYpR1M8R4YawnLDtDsMmWM1NbBmgJ59";
 
 /// USDC Mint
 pub const USDC_MINT: &str = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
@@ -257,7 +255,7 @@ pub fn create_flash_borrow_instruction(
     let args = FlashBorrowReserveLiquidityArgs { liquidity_amount };
     
     let mut data = flash_borrow_discriminator().to_vec();
-    data.extend_from_slice(&args.try_to_vec().unwrap());
+    data.extend_from_slice(&borsh::to_vec(&args).unwrap());
     
     let mut account_metas = vec![
         AccountMeta::new_readonly(accounts.user_transfer_authority, true),
@@ -308,7 +306,7 @@ pub fn create_flash_repay_instruction(
     };
     
     let mut data = flash_repay_discriminator().to_vec();
-    data.extend_from_slice(&args.try_to_vec().unwrap());
+    data.extend_from_slice(&borsh::to_vec(&args).unwrap());
     
     let mut account_metas = vec![
         AccountMeta::new_readonly(accounts.user_transfer_authority, true),
@@ -548,20 +546,19 @@ pub async fn build_flash_loan_tx(
     let user_pubkey = keypair.pubkey();
     
     // Configuración de cuentas principales
-    let kamino_program = Pubkey::from_str(KAMINO_LEND_PROGRAM)?;
     let lending_market = Pubkey::from_str(MAIN_LENDING_MARKET)?;
     let reserve = Pubkey::from_str(USDC_RESERVE)?;
     let reserve_liquidity_mint = Pubkey::from_str(USDC_MINT)?;
     let token_program = Pubkey::from_str(TOKEN_PROGRAM_ID)?;
-    
+
     // Calcular PDAs
     let (lending_market_authority, _) = get_lending_market_authority(&lending_market);
     let (reserve_source_liquidity, _) = get_reserve_liquidity_supply(&reserve);
     let (reserve_liquidity_fee_receiver, _) = get_reserve_fee_receiver(&reserve);
-    
+
     // ATA del usuario para recibir liquidez prestada (USDC)
     let user_destination_liquidity = get_associated_token_address(&user_pubkey, &reserve_liquidity_mint);
-    
+
     // Verificar que el usuario tiene la ATA creada y agregar instrucción de creación si es necesario
     let mut setup_instructions: Vec<Instruction> = Vec::new();
     match client.get_account(&user_destination_liquidity).await {
@@ -632,7 +629,6 @@ pub async fn build_flash_loan_tx(
     
     // 2. JUPITER SWAP - Arbitrage (USDC -> SOL -> USDC)
     // Obtener quote de Jupiter
-    let sol_mint = Pubkey::from_str(SOL_MINT)?;
     let jupiter_quote = match get_jupiter_swap_quote(
         USDC_MINT,
         SOL_MINT,
@@ -752,12 +748,11 @@ pub async fn build_simple_flash_loan_tx(
     let recent_blockhash = client.get_latest_blockhash().await?;
     let user_pubkey = keypair.pubkey();
     
-    let kamino_program = Pubkey::from_str(KAMINO_LEND_PROGRAM)?;
     let lending_market = Pubkey::from_str(MAIN_LENDING_MARKET)?;
     let reserve = Pubkey::from_str(reserve_pubkey)?;
     let reserve_liquidity_mint = Pubkey::from_str(mint_pubkey)?;
     let token_program = Pubkey::from_str(TOKEN_PROGRAM_ID)?;
-    
+
     let (lending_market_authority, _) = get_lending_market_authority(&lending_market);
     let (reserve_source_liquidity, _) = get_reserve_liquidity_supply(&reserve);
     let (reserve_liquidity_fee_receiver, _) = get_reserve_fee_receiver(&reserve);
@@ -822,29 +817,19 @@ pub async fn build_simple_flash_loan_tx(
 /// - API de Kamino
 pub mod kamino_reserves {
     use super::*;
-    
+
     /// Main Lending Market de Kamino (Main Market)
-    pub const MAIN_MARKET: &str = "7u3HeHxYDLhnCoErrtycNokbQYbWGzLs6JSDqGAv6PfF";
-    
-    /// USDC Reserve (Main Market)
-    /// Dirección real: Consultar en https://app.kamino.finance
-    pub const USDC: &str = "7u3HeHxYDLhnCoErrtycNokbQYbWGzLs6JSDqGAv6PfF";
-    
-    /// USDT Reserve (Main Market)
-    pub const USDT: &str = "H3UzaFE62L9d4ZdYtbr6S1q7n3pQc7R7q1n4v3Z7v3Z7";
-    
-    /// SOL (Wrapped) Reserve (Main Market)
-    pub const SOL: &str = "9g7J4E7j2Z3q4v5w6x7y8z9a0b1c2d3e4f5g6h7i8j9k0";
-    
-    /// jitoSOL Reserve (Main Market)
-    pub const JITO_SOL: &str = "7u3HeHxYDLhnCoErrtycNokbQYbWGzLs6JSDqGAv6PfF";
-    
-    /// mSOL Reserve (Main Market)
-    pub const MSOL: &str = "7u3HeHxYDLhnCoErrtycNokbQYbWGzLs6JSDqGAv6PfF";
-    
-    /// BONK Reserve (Main Market)
-    pub const BONK: &str = "7u3HeHxYDLhnCoErrtycNokbQYbWGzLs6JSDqGAv6PfF";
-    
+    pub const MAIN_MARKET: &str = "7u3HeHxYDLhnCoErrtycNokbQYbWGzLs6JSDqGAv5PfF";
+
+    /// USDC Reserve (Main Market) - real mainnet address
+    pub const USDC: &str = "D6q6wuQSrifJKZYpR1M8R4YawnLDtDsMmWM1NbBmgJ59";
+
+    /// USDT Reserve (Main Market) - real mainnet address
+    pub const USDT: &str = "H3t6qZ1JkguCNTi9uzVKqQ7dvt2cum4XiXWom6Gn5e5S";
+
+    /// SOL (Wrapped) Reserve (Main Market) - real mainnet address
+    pub const SOL: &str = "d4A2prbA2whesmvHaL88BH6Ewn5N4bTSU2Ze8P6Bc4Q";
+
     /// Estructura para información de un reserve
     #[derive(Debug, Clone)]
     pub struct ReserveInfo {
@@ -853,7 +838,7 @@ pub mod kamino_reserves {
         pub symbol: String,
         pub decimals: u8,
     }
-    
+
     /// Obtiene la lista de reserves conocidos
     pub fn get_known_reserves() -> Vec<ReserveInfo> {
         vec![
