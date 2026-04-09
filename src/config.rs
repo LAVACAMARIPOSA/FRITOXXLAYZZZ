@@ -33,3 +33,25 @@ pub fn get_jito_auth_key() -> Option<String> {
 pub fn kamino_program_id() -> Pubkey {
     Pubkey::from_str(KAMINO_PROGRAM_ID).unwrap()
 }
+
+// Telegram configuration (optional - bot works without it)
+pub fn get_telegram_bot_token() -> Option<String> {
+    env::var("TELEGRAM_BOT_TOKEN").ok()
+}
+
+pub fn get_telegram_chat_id() -> Option<String> {
+    env::var("TELEGRAM_CHAT_ID").ok()
+}
+
+// Data directory for persistent memory
+pub fn get_data_dir() -> String {
+    env::var("DATA_DIR").unwrap_or_else(|_| "data".to_string())
+}
+
+// Health server port (for HuggingFace Spaces)
+pub fn get_health_port() -> u16 {
+    env::var("PORT")
+        .unwrap_or_else(|_| "7860".to_string())
+        .parse()
+        .unwrap_or(7860)
+}
