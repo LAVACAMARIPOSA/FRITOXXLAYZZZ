@@ -19,7 +19,7 @@ pub async fn build_flash_loan_tx(
 
     let _ = amount;
 
-    // Placeholder realista: en producción usa klend-sdk para getFlashLoanInstructions
+    // TODO: Aqui van las instrucciones reales de Kamino (klend-sdk)
     let instructions: Vec<Instruction> = vec![];
 
     let message = Message::try_compile(&keypair.pubkey(), &instructions, &[], recent_blockhash)?;

@@ -1,4 +1,6 @@
-.tmp/
-target/
+/target
 keypair.json
+*.zip
+.DS_Store
 .env
+.tmp/

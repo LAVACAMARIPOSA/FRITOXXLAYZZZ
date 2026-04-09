@@ -2,13 +2,13 @@ services:
   - type: worker
     name: solana-zero-capital-beast
     env: rust
-    plan: starter
     buildCommand: cargo build --release
     startCommand: ./target/release/solana-zero-capital-beast
     envVars:
+      - key: SOLANA_KEYPAIR_JSON
+        sync: false
       - key: RUST_LOG
         value: info
-      - key: RPC_URL
         sync: false
-      - key: SOLANA_KEYPAIR_JSON
+      - key: RPC_URL
         sync: false

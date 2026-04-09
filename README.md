@@ -1,52 +1,24 @@
-# Solana Zero-Capital Beast
+# Solana Zero-Capital Beast v1.0
 
-Bot de arbitrage y liquidaciones en Solana preparado para correr como worker en Render.
+Bot de "dinero del aire" usando Flash Loans de Kamino + Arbitrage con Jupiter.
 
-## Deploy en Render
+## Despliegue en Render (facil)
 
-Este repo incluye `render.yaml` para crear un worker de Render.
+1. Ve a Render -> **New +** -> **Blueprint**
+2. Conecta el repo `LAVACAMARIPOSA/FRITOXXLAYZZZ`
+3. Agrega estas variables de entorno:
+   - `RPC_URL` = `https://api.mainnet-beta.solana.com` (o tu RPC premium)
+   - `SOLANA_KEYPAIR_JSON` = `[tu array de 64 numeros]` -> **marcar como Secret**
+4. Pulsa Deploy
 
-Checklist express en: `RENDER_DEPLOY_CHECKLIST.md`.
-
-Pasos exactos en Render:
-
-1. Entra a Render y elige `New +`.
-2. Selecciona `Blueprint`.
-3. Conecta el repositorio `LAVACAMARIPOSA/FRITOXXLAYZZZ`.
-4. Confirma la creación del worker `solana-zero-capital-beast`.
-5. Define las variables `RPC_URL` y `SOLANA_KEYPAIR_JSON` antes del primer deploy.
-6. Lanza el deploy.
-
-Variables de entorno necesarias en Render:
-
-- `RPC_URL`: endpoint RPC de Solana mainnet o tu proveedor.
-- `SOLANA_KEYPAIR_JSON`: keypair completo en formato JSON array de 64 bytes.
-
-Variables opcionales:
-
-- `RUST_LOG`: nivel de logs.
-
-Notas importantes para Render:
-
-- En Render no debes depender de `keypair.json` subido al repo.
-- Usa `SOLANA_KEYPAIR_JSON` como secret del servicio.
-- Si tu proveedor RPC requiere headers o auth adicional, usa su URL privada completa en `RPC_URL`.
+**Importante**: Manten `DRY_RUN = true` en la primera ejecucion.
 
 ## Ejecucion local
 
 ```bash
-cargo build
+solana-keygen new -o keypair.json --no-passphrase
 cargo run
 ```
 
-Si ejecutas localmente con archivo:
+Nunca uses capital propio.
 
-```bash
-solana-keygen new -o keypair.json --no-passphrase
-```
-
-Si prefieres entorno local con variables:
-
-```bash
-cp .env.example .env
-```
