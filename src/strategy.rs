@@ -40,10 +40,11 @@ impl StrategyEngine {
         let risk = memory.risk_level;
 
         // Minimum profit thresholds per risk level (USD).
+        // Use memory's adaptive min_profit if available, otherwise defaults.
         let min_profit = match risk {
-            RiskLevel::Safe => 2.0,
-            RiskLevel::Normal => 0.8,
-            RiskLevel::Aggressive => 0.3,
+            RiskLevel::Safe => memory.suggest_min_profit().max(0.50),
+            RiskLevel::Normal => memory.suggest_min_profit().max(0.15),
+            RiskLevel::Aggressive => memory.suggest_min_profit().max(0.05),
         };
 
         // Congestion ceiling – skip when network is too busy for our risk

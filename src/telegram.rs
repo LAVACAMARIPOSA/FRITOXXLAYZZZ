@@ -167,6 +167,9 @@ fn contains_any(haystack: &str, needles: &[&str]) -> bool {
 // TelegramBot
 // ---------------------------------------------------------------------------
 
+/// Maximum number of conversation messages to keep in memory for AI context.
+const MAX_CHAT_HISTORY: usize = 20;
+
 pub struct TelegramBot {
     client: Client,
     token: String,
@@ -176,6 +179,8 @@ pub struct TelegramBot {
     message_count: u64,
     last_message_time: u64,
     groq_api_key: Option<String>,
+    /// Recent conversation history for Groq AI context.
+    chat_history: Vec<GroqMessage>,
 }
 
 impl TelegramBot {
@@ -202,6 +207,7 @@ impl TelegramBot {
             message_count: 0,
             last_message_time: 0,
             groq_api_key: groq_key,
+            chat_history: Vec::new(),
         }
     }
 
@@ -330,9 +336,9 @@ impl TelegramBot {
     /// The agent_context string contains the current state of the bot.
     /// Returns the AI response, and optionally a BotCommand if the AI
     /// decided the user wants to execute an action.
-    pub async fn ask_ai(&self, user_message: &str, agent_context: &str) -> (String, Option<BotCommand>) {
+    pub async fn ask_ai(&mut self, user_message: &str, agent_context: &str) -> (String, Option<BotCommand>) {
         let api_key = match &self.groq_api_key {
-            Some(k) => k,
+            Some(k) => k.clone(),
             None => {
                 return (
                     "No entendi. Comandos: /status /stats /memory /balance /aggressive /safe /stop /start /help".to_string(),
@@ -344,7 +350,8 @@ impl TelegramBot {
         let system_prompt = format!(
             "Eres ELCOQUI, un agente autonomo de trading DeFi en Solana. \
              Respondes en espanol, breve y directo (max 3-4 lineas). \
-             Usas un tono informal y amigable.\n\n\
+             Usas un tono informal y amigable. \
+             IMPORTANTE: Recuerdas la conversacion anterior con el usuario.\n\n\
              Estado actual del agente:\n{}\n\n\
              Si el usuario quiere que hagas algo, incluye EXACTAMENTE uno de estos \
              tags al final de tu respuesta (solo si aplica):\n\
@@ -357,12 +364,24 @@ impl TelegramBot {
             agent_context
         );
 
+        // Store user message in chat history
+        self.chat_history.push(GroqMessage {
+            role: "user".to_string(),
+            content: user_message.to_string(),
+        });
+
+        // Build messages array: system + conversation history
+        let mut messages = vec![
+            GroqMessage { role: "system".to_string(), content: system_prompt },
+        ];
+        messages.extend(self.chat_history.iter().map(|m| GroqMessage {
+            role: m.role.clone(),
+            content: m.content.clone(),
+        }));
+
         let request = GroqRequest {
             model: "llama-3.3-70b-versatile".to_string(),
-            messages: vec![
-                GroqMessage { role: "system".to_string(), content: system_prompt },
-                GroqMessage { role: "user".to_string(), content: user_message.to_string() },
-            ],
+            messages,
             max_tokens: 300,
             temperature: 0.7,
         };
@@ -425,6 +444,18 @@ impl TelegramBot {
             .replace("[CMD:RESET]", "")
             .trim()
             .to_string();
+
+        // Store assistant response in chat history
+        self.chat_history.push(GroqMessage {
+            role: "assistant".to_string(),
+            content: clean_text.clone(),
+        });
+
+        // Trim history to keep only the last MAX_CHAT_HISTORY messages
+        if self.chat_history.len() > MAX_CHAT_HISTORY {
+            let drain_count = self.chat_history.len() - MAX_CHAT_HISTORY;
+            self.chat_history.drain(0..drain_count);
+        }
 
         (clean_text, cmd)
     }

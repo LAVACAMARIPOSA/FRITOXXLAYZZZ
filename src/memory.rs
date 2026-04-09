@@ -142,7 +142,7 @@ impl AgentMemory {
             total_loss_usd: 0.0,
             total_cycles: 0,
 
-            min_profit_usd: 0.8,
+            min_profit_usd: 0.15,
             flash_loan_amount_lamports: 500_000_000, // 0.5 SOL
             tip_pct: 0.80,
             risk_level: RiskLevel::Normal,
@@ -215,6 +215,9 @@ impl AgentMemory {
             let drain_count = self.history.len() - self.max_history;
             self.history.drain(0..drain_count);
         }
+
+        // Auto-save after each opportunity (important data)
+        self.save();
     }
 
     pub fn record_cycle(&mut self) {
@@ -275,23 +278,23 @@ impl AgentMemory {
                 RiskLevel::Safe => {
                     // Conservative: raise min_profit when losing
                     if recent_rate < 0.3 {
-                        self.min_profit_usd = (self.min_profit_usd * 1.1).min(5.0);
+                        self.min_profit_usd = (self.min_profit_usd * 1.1).min(2.0);
                     } else if recent_rate > 0.7 {
-                        self.min_profit_usd = (self.min_profit_usd * 0.95).max(0.3);
+                        self.min_profit_usd = (self.min_profit_usd * 0.95).max(0.15);
                     }
                 }
                 RiskLevel::Normal => {
                     if recent_rate < 0.3 {
-                        self.min_profit_usd = (self.min_profit_usd * 1.05).min(5.0);
+                        self.min_profit_usd = (self.min_profit_usd * 1.05).min(1.5);
                     } else if recent_rate > 0.6 {
-                        self.min_profit_usd = (self.min_profit_usd * 0.97).max(0.2);
+                        self.min_profit_usd = (self.min_profit_usd * 0.97).max(0.10);
                     }
                 }
                 RiskLevel::Aggressive => {
                     if recent_rate < 0.2 {
-                        self.min_profit_usd = (self.min_profit_usd * 1.02).min(5.0);
+                        self.min_profit_usd = (self.min_profit_usd * 1.02).min(1.0);
                     } else if recent_rate > 0.5 {
-                        self.min_profit_usd = (self.min_profit_usd * 0.93).max(0.1);
+                        self.min_profit_usd = (self.min_profit_usd * 0.93).max(0.05);
                     }
                 }
             }
@@ -544,7 +547,7 @@ mod tests {
     #[test]
     fn test_new_defaults() {
         let mem = AgentMemory::new();
-        assert_eq!(mem.min_profit_usd, 0.8);
+        assert_eq!(mem.min_profit_usd, 0.15);
         assert_eq!(mem.flash_loan_amount_lamports, 500_000_000);
         assert!((mem.tip_pct - 0.80).abs() < f64::EPSILON);
         assert_eq!(mem.risk_level, RiskLevel::Normal);

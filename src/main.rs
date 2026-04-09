@@ -145,15 +145,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         config::DRY_RUN
                     );
                     if let Some(ai_cmd) = telegram.handle_unknown_with_ai(&msg, &context).await {
-                        // AI detected user intent - execute the command
+                        // AI detected user intent - execute silently (AI already replied)
                         match ai_cmd {
                             BotCommand::Start => {
                                 running = true;
-                                telegram.send_alert("Agente ACTIVADO").await;
                             }
                             BotCommand::Stop => {
                                 running = false;
-                                telegram.send_alert("Agente PAUSADO").await;
                             }
                             BotCommand::Aggressive => {
                                 agent_memory.set_risk_level(memory::RiskLevel::Aggressive);
@@ -272,8 +270,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        // 3. Persist memory
-        if cycle % 10 == 0 { agent_memory.save(); }
+        // 3. Persist memory (every 5 cycles, or after opportunities via record_opportunity)
+        if cycle % 5 == 0 { agent_memory.save(); }
 
         // 4. Telegram summary every ~30 min (360 cycles * 5s)
         if cycle - last_summary_cycle >= 360 {
