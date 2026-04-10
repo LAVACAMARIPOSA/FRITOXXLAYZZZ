@@ -85,6 +85,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut last_summary_cycle: u64 = 0;
     let mut last_liq_scan_cycle: u64 = 0;
     let mut last_liq_error: Option<String> = None;
+    let mut last_adapt_cycle: u64 = 0;
 
     // ====================================================================
     // MAIN LOOP - 24/7 Autonomous Agent
@@ -130,7 +131,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     telegram.send_alert("Modo SEGURO").await;
                 }
                 BotCommand::Memory => {
-                    telegram.send_message(&agent_memory.summary()).await;
+                    let learning = agent_memory.learning_report();
+                    telegram.send_message(&format!(
+                        "{}\n\n--- Aprendizaje ---\n{}", agent_memory.summary(), learning
+                    )).await;
                 }
                 BotCommand::Reset => {
                     agent_memory.reset();
@@ -141,12 +145,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 BotCommand::Unknown(msg) => {
                     // Ask Groq AI for a conversational response
+                    let learning_ctx = agent_memory.learning_report();
+                    let scan_ctx = agent_memory.scan_summary();
                     let context = format!(
-                        "Ciclos: {}\nActivo: {}\nRiesgo: {:?}\nProfit total: ${:.2}\nOportunidades: {}\nFallos: {}\nRacha: {}\nDRY_RUN: {}",
+                        "Ciclos: {}\nActivo: {}\nRiesgo: {:?}\nProfit total: ${:.2}\nOportunidades: {}\nFallos: {}\nRacha: {}\nDRY_RUN: {}\n\nScanner:\n{}\n\nAprendizaje:\n{}",
                         cycle, running, agent_memory.risk_level,
                         agent_memory.total_profit_usd, agent_memory.total_opportunities,
                         agent_memory.total_failures, agent_memory.current_win_streak,
-                        config::DRY_RUN
+                        config::DRY_RUN, scan_ctx, learning_ctx
                     );
                     if let Some(ai_cmd) = telegram.handle_unknown_with_ai(&msg, &context).await {
                         // AI detected user intent - execute silently (AI already replied)
@@ -216,8 +222,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None => {}
             }
 
-            // STRATEGY 2: Liquidations (throttled - every 30 cycles to avoid RPC overload)
-            if strategy.should_scan_liquidations(&agent_memory) && (cycle - last_liq_scan_cycle >= 30) {
+            // STRATEGY 2: Liquidations (throttled with adaptive interval)
+            let liq_interval = agent_memory.get_liq_scan_interval();
+            if strategy.should_scan_liquidations(&agent_memory) && (cycle - last_liq_scan_cycle >= liq_interval) {
                 last_liq_scan_cycle = cycle;
                 let scan_result = liquidation::scan_small_liquidations(&client).await;
 
@@ -302,6 +309,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &client, &keypair, 1_000_000, flash_loan::USDC_RESERVE, flash_loan::USDC_MINT,
                 ).await {
                     utils::log_success("Flash loan test OK");
+                }
+            }
+
+            // LEARNING: Adapt after every 3 cycles based on accumulated experience
+            if cycle - last_adapt_cycle >= 3 {
+                last_adapt_cycle = cycle;
+                agent_memory.adapt_after_scan();
+
+                // Log what the bot learned every 60 cycles (~5 min)
+                if cycle % 60 == 0 {
+                    let report = agent_memory.learning_report();
+                    utils::log_info(&format!("Learning:\n{}", report));
                 }
             }
         }

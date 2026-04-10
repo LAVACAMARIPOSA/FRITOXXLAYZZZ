@@ -357,9 +357,8 @@ pub const JUP_MINT: &str = "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN";
 // STRATEGY: ROUND-TRIP ARBITRAGE (A -> B -> A)
 // =============================================================================
 
-/// Busca arbitrage en múltiples pares simultáneamente.
-/// Retorna el mejor profit encontrado y la ruta.
-/// Also updates scan metrics in agent memory.
+/// Busca arbitrage en múltiples pares, priorizando rutas que el bot aprendió son mejores.
+/// Salta rutas en backoff (por fallos anteriores). Adapta delays según experiencia.
 pub async fn scan_arbitrage_opportunities(
     base_mint: &str,
     amount: u64,
@@ -377,33 +376,63 @@ pub async fn scan_arbitrage_opportunities(
         (JUP_MINT, "JUP"),
     ];
 
-    let mut best: Option<(f64, String)> = None;
+    // Build route names and prioritize using learned data
+    let route_names: Vec<String> = intermediates.iter()
+        .map(|(_, sym)| format!("USDC->{}->USDC", sym))
+        .collect();
+    let prioritized = memory.prioritized_routes(&route_names);
 
-    for (mint, symbol) in &intermediates {
-        let route = format!("USDC->{}->USDC", symbol);
+    let api_delay = memory.get_api_delay_ms();
+    let mut best: Option<(f64, String)> = None;
+    let mut scanned = 0u32;
+    let mut skipped = 0u32;
+
+    for route_name in &prioritized {
+        // Find the corresponding mint
+        let (mint, symbol) = match intermediates.iter()
+            .find(|(_, sym)| route_name == &format!("USDC->{}->USDC", sym))
+        {
+            Some(pair) => pair,
+            None => continue,
+        };
+
+        // Check if learning says to skip this route
+        if !memory.should_scan_route(route_name) {
+            skipped += 1;
+            continue;
+        }
+
+        scanned += 1;
+
         match get_best_jupiter_quote(base_mint, mint, amount).await {
             Ok(result) => {
                 memory.scan_quotes_ok += result.quotes_ok;
-                memory.record_scan_spread(result.spread_pct, &route);
+                memory.record_scan_spread(result.spread_pct, route_name);
+                memory.learn_route_success(route_name, result.spread_pct);
 
                 if result.profit_usd > config::MIN_PROFIT_USD {
-                    utils::log_info(&format!("  {} = +${:.4} ({:+.3}%)", route, result.profit_usd, result.spread_pct));
+                    utils::log_info(&format!("  {} = +${:.4} ({:+.3}%)", route_name, result.profit_usd, result.spread_pct));
                     match &best {
                         Some((b, _)) if result.profit_usd <= *b => {}
-                        _ => { best = Some((result.profit_usd, route)); }
+                        _ => { best = Some((result.profit_usd, route_name.clone())); }
                     }
                 } else {
-                    utils::log_info(&format!("  {} = ${:.4} ({:+.3}%)", route, result.profit_usd, result.spread_pct));
+                    utils::log_info(&format!("  {} = ${:.4} ({:+.3}%)", route_name, result.profit_usd, result.spread_pct));
                 }
             }
             Err(e) => {
                 memory.scan_quotes_failed += 1;
-                utils::log_error(&format!("  {} quote failed: {}", route, e));
+                memory.learn_route_failure(route_name);
+                utils::log_error(&format!("  {} FAIL (backoff activado): {}", route_name, e));
             }
         }
 
-        // Delay between pairs to avoid rate limiting
-        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+        // Use adaptive delay learned from experience
+        tokio::time::sleep(tokio::time::Duration::from_millis(api_delay)).await;
+    }
+
+    if skipped > 0 {
+        utils::log_info(&format!("  [{} rutas escaneadas, {} en backoff por fallos previos]", scanned, skipped));
     }
 
     best
@@ -432,33 +461,38 @@ pub async fn scan_triangular_arbitrage(amount: u64, memory: &mut AgentMemory) ->
     let mut best: Option<(f64, String)> = None;
     let flash_fee = amount * 9 / 10_000;
 
+    let api_delay = memory.get_api_delay_ms();
+
     for (mid1, mid2, sym1, sym2) in &triangles {
         let route = format!("USDC->{}->{}->USDC", sym1, sym2);
+
+        // Skip if learning says this route is in backoff
+        if !memory.should_scan_route(&route) { continue; }
 
         // Leg 1: USDC -> mid1
         let q1 = match get_jupiter_quote_with_slippage(USDC_MINT, mid1, amount, &slippage).await {
             Ok(q) => { memory.record_quote_ok(); q }
-            Err(_) => { memory.record_quote_failed(); continue; }
+            Err(_) => { memory.record_quote_failed(); memory.learn_route_failure(&route); continue; }
         };
         let amt1 = q1.out_amount.parse::<u64>().unwrap_or(0);
         if amt1 == 0 { continue; }
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(api_delay)).await;
 
         // Leg 2: mid1 -> mid2
         let q2 = match get_jupiter_quote_with_slippage(mid1, mid2, amt1, &slippage).await {
             Ok(q) => { memory.record_quote_ok(); q }
-            Err(_) => { memory.record_quote_failed(); continue; }
+            Err(_) => { memory.record_quote_failed(); memory.learn_route_failure(&route); continue; }
         };
         let amt2 = q2.out_amount.parse::<u64>().unwrap_or(0);
         if amt2 == 0 { continue; }
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(api_delay)).await;
 
         // Leg 3: mid2 -> USDC
         let q3 = match get_jupiter_quote_with_slippage(mid2, USDC_MINT, amt2, &slippage).await {
             Ok(q) => { memory.record_quote_ok(); q }
-            Err(_) => { memory.record_quote_failed(); continue; }
+            Err(_) => { memory.record_quote_failed(); memory.learn_route_failure(&route); continue; }
         };
         let final_amt = q3.out_amount.parse::<u64>().unwrap_or(0);
 
@@ -468,6 +502,7 @@ pub async fn scan_triangular_arbitrage(amount: u64, memory: &mut AgentMemory) ->
         let profit_usd = profit_raw as f64 / 1_000_000.0;
 
         memory.record_scan_spread(spread_pct, &route);
+        memory.learn_route_success(&route, spread_pct);
 
         if final_amt > total_cost {
             utils::log_info(&format!("  triangular {} = +${:.4} ({:+.3}%)", route, profit_usd, spread_pct));
@@ -479,7 +514,7 @@ pub async fn scan_triangular_arbitrage(amount: u64, memory: &mut AgentMemory) ->
             utils::log_info(&format!("  triangular {} = ${:.4} ({:+.3}%)", route, profit_usd, spread_pct));
         }
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(api_delay)).await;
     }
 
     best
@@ -496,19 +531,23 @@ pub async fn scan_stablecoin_arb(amount: u64, memory: &mut AgentMemory) -> Optio
     let flash_fee = amount * 9 / 10_000;
     let route = "USDC->USDT->USDC (depeg)";
 
+    if !memory.should_scan_route(route) { return None; }
+
+    let api_delay = memory.get_api_delay_ms();
+
     // USDC -> USDT -> USDC
     let q1 = match get_jupiter_quote_with_slippage(USDC_MINT, USDT_MINT, amount, &slippage).await {
         Ok(q) => { memory.record_quote_ok(); q }
-        Err(_) => { memory.record_quote_failed(); return None; }
+        Err(_) => { memory.record_quote_failed(); memory.learn_route_failure(route); return None; }
     };
     let usdt_amount = q1.out_amount.parse::<u64>().unwrap_or(0);
     if usdt_amount == 0 { return None; }
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    tokio::time::sleep(tokio::time::Duration::from_millis(api_delay)).await;
 
     let q2 = match get_jupiter_quote_with_slippage(USDT_MINT, USDC_MINT, usdt_amount, &slippage).await {
         Ok(q) => { memory.record_quote_ok(); q }
-        Err(_) => { memory.record_quote_failed(); return None; }
+        Err(_) => { memory.record_quote_failed(); memory.learn_route_failure(route); return None; }
     };
     let final_usdc = q2.out_amount.parse::<u64>().unwrap_or(0);
 
@@ -518,6 +557,7 @@ pub async fn scan_stablecoin_arb(amount: u64, memory: &mut AgentMemory) -> Optio
     let profit_usd = profit_raw as f64 / 1_000_000.0;
 
     memory.record_scan_spread(spread_pct, route);
+    memory.learn_route_success(route, spread_pct);
 
     if final_usdc > total_cost && profit_usd > 0.01 {
         return Some((profit_usd, route.to_string()));
@@ -545,31 +585,35 @@ pub async fn scan_lst_premium(amount: u64, memory: &mut AgentMemory) -> Option<(
 
     let mut best: Option<(f64, String)> = None;
 
+    let api_delay = memory.get_api_delay_ms();
+
     for (lst_mint, symbol) in &lst_tokens {
         let route = format!("USDC->{}->SOL->USDC (LST)", symbol);
+
+        if !memory.should_scan_route(&route) { continue; }
 
         // Direction 1: USDC -> LST -> SOL -> USDC
         let q1 = match get_jupiter_quote_with_slippage(USDC_MINT, lst_mint, amount, &slippage).await {
             Ok(q) => { memory.record_quote_ok(); q }
-            Err(_) => { memory.record_quote_failed(); continue; }
+            Err(_) => { memory.record_quote_failed(); memory.learn_route_failure(&route); continue; }
         };
         let lst_amt = q1.out_amount.parse::<u64>().unwrap_or(0);
         if lst_amt == 0 { continue; }
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(api_delay)).await;
 
         let q2 = match get_jupiter_quote_with_slippage(lst_mint, SOL_MINT, lst_amt, &slippage).await {
             Ok(q) => { memory.record_quote_ok(); q }
-            Err(_) => { memory.record_quote_failed(); continue; }
+            Err(_) => { memory.record_quote_failed(); memory.learn_route_failure(&route); continue; }
         };
         let sol_amt = q2.out_amount.parse::<u64>().unwrap_or(0);
         if sol_amt == 0 { continue; }
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(api_delay)).await;
 
         let q3 = match get_jupiter_quote_with_slippage(SOL_MINT, USDC_MINT, sol_amt, &slippage).await {
             Ok(q) => { memory.record_quote_ok(); q }
-            Err(_) => { memory.record_quote_failed(); continue; }
+            Err(_) => { memory.record_quote_failed(); memory.learn_route_failure(&route); continue; }
         };
         let final_usdc = q3.out_amount.parse::<u64>().unwrap_or(0);
 
@@ -579,6 +623,7 @@ pub async fn scan_lst_premium(amount: u64, memory: &mut AgentMemory) -> Option<(
         let profit_usd = profit_raw as f64 / 1_000_000.0;
 
         memory.record_scan_spread(spread_pct, &route);
+        memory.learn_route_success(&route, spread_pct);
 
         if final_usdc > total_cost {
             utils::log_info(&format!("  LST {} = +${:.4} ({:+.3}%)", route, profit_usd, spread_pct));
@@ -590,7 +635,7 @@ pub async fn scan_lst_premium(amount: u64, memory: &mut AgentMemory) -> Option<(
             utils::log_info(&format!("  LST {} = ${:.4} ({:+.3}%)", route, profit_usd, spread_pct));
         }
 
-        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+        tokio::time::sleep(tokio::time::Duration::from_millis(api_delay)).await;
     }
 
     best

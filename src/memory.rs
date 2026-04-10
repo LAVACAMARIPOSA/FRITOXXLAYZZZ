@@ -71,6 +71,174 @@ impl Default for RouteScore {
 }
 
 // ---------------------------------------------------------------------------
+// Route Learning - tracks per-route failure/success patterns
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouteLearnEntry {
+    /// Total times this route was scanned
+    pub times_scanned: u64,
+    /// Times the API call itself failed (timeout, rate limit)
+    pub times_api_failed: u64,
+    /// Consecutive failures in a row (resets on success)
+    pub consecutive_failures: u32,
+    /// Times a profitable spread was found
+    pub times_profitable: u64,
+    /// Running average spread percentage
+    pub avg_spread_pct: f64,
+    /// Best spread ever seen
+    pub best_spread_pct: f64,
+    /// Worst spread seen (most negative)
+    pub worst_spread_pct: f64,
+    /// Timestamp of last successful scan
+    pub last_success_ts: u64,
+    /// Timestamp of last failure
+    pub last_failure_ts: u64,
+    /// Skip this route until this timestamp (backoff)
+    pub skip_until_ts: u64,
+    /// Computed priority score (higher = scan first). Updated by learn.
+    pub priority_score: f64,
+}
+
+impl RouteLearnEntry {
+    pub fn new() -> Self {
+        Self {
+            times_scanned: 0,
+            times_api_failed: 0,
+            consecutive_failures: 0,
+            times_profitable: 0,
+            avg_spread_pct: -1.0, // pessimistic default
+            best_spread_pct: f64::NEG_INFINITY,
+            worst_spread_pct: 0.0,
+            last_success_ts: 0,
+            last_failure_ts: 0,
+            skip_until_ts: 0,
+            priority_score: 50.0, // neutral default
+        }
+    }
+
+    /// Record a successful quote with a spread result
+    pub fn record_success(&mut self, spread_pct: f64) {
+        self.times_scanned += 1;
+        self.consecutive_failures = 0;
+        self.last_success_ts = current_timestamp();
+        self.skip_until_ts = 0; // clear any backoff
+
+        // Update best/worst
+        if spread_pct > self.best_spread_pct {
+            self.best_spread_pct = spread_pct;
+        }
+        if spread_pct < self.worst_spread_pct {
+            self.worst_spread_pct = spread_pct;
+        }
+
+        // Running average (exponential moving average, alpha=0.2 for recent bias)
+        if self.times_scanned <= 1 {
+            self.avg_spread_pct = spread_pct;
+        } else {
+            self.avg_spread_pct = self.avg_spread_pct * 0.8 + spread_pct * 0.2;
+        }
+
+        if spread_pct > 0.0 {
+            self.times_profitable += 1;
+        }
+    }
+
+    /// Record a failed API call (timeout, rate limit, etc)
+    pub fn record_api_failure(&mut self) {
+        self.times_scanned += 1;
+        self.times_api_failed += 1;
+        self.consecutive_failures += 1;
+        self.last_failure_ts = current_timestamp();
+
+        // Exponential backoff: skip for 2^(consecutive_failures) * 10 seconds
+        // Max backoff: ~10 minutes (2^6 * 10 = 640s)
+        let backoff_secs = (10u64).saturating_mul(
+            2u64.saturating_pow(self.consecutive_failures.min(6))
+        );
+        self.skip_until_ts = current_timestamp() + backoff_secs;
+    }
+
+    /// Should this route be skipped right now?
+    pub fn should_skip(&self) -> bool {
+        self.skip_until_ts > 0 && current_timestamp() < self.skip_until_ts
+    }
+
+    /// Compute priority score (called by learning cycle)
+    /// Higher = better = scan first
+    pub fn compute_priority(&mut self) {
+        let mut score: f64 = 50.0; // base
+
+        // Reward routes with good average spread (closer to 0% or positive)
+        // avg_spread of -0.1% is much better than -1.0%
+        score += self.avg_spread_pct * 20.0; // -0.1% → +48, -1.0% → +30
+
+        // Reward routes that have been profitable before
+        if self.times_scanned > 0 {
+            let profit_rate = self.times_profitable as f64 / self.times_scanned as f64;
+            score += profit_rate * 30.0; // 100% profitable → +30
+        }
+
+        // Reward routes with good best-ever spread
+        if self.best_spread_pct > f64::NEG_INFINITY {
+            score += self.best_spread_pct * 10.0;
+        }
+
+        // Penalize routes with high API failure rate
+        if self.times_scanned > 3 {
+            let fail_rate = self.times_api_failed as f64 / self.times_scanned as f64;
+            score -= fail_rate * 20.0; // 100% fail → -20
+        }
+
+        // Penalize currently backed off routes
+        if self.should_skip() {
+            score -= 30.0;
+        }
+
+        self.priority_score = score;
+    }
+}
+
+impl Default for RouteLearnEntry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Adaptive Scanner Parameters - adjusted by learning
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdaptiveScanner {
+    /// Delay between API calls in ms (adapts based on failure rate)
+    pub api_delay_ms: u64,
+    /// Interval between liquidation scans in cycles
+    pub liq_scan_interval: u64,
+    /// Total scan cycles completed
+    pub scan_cycles: u64,
+    /// Last adaptation timestamp
+    pub last_adapt_ts: u64,
+}
+
+impl AdaptiveScanner {
+    pub fn new() -> Self {
+        Self {
+            api_delay_ms: 300,
+            liq_scan_interval: 30,
+            scan_cycles: 0,
+            last_adapt_ts: current_timestamp(),
+        }
+    }
+}
+
+impl Default for AdaptiveScanner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Agent Memory
 // ---------------------------------------------------------------------------
 
@@ -108,6 +276,10 @@ pub struct AgentMemory {
     pub flash_loan_amount_lamports: u64,
     pub tip_pct: f64,
     pub risk_level: RiskLevel,
+
+    // Route learning (PERSISTED - this is the brain)
+    pub route_learning: HashMap<String, RouteLearnEntry>,
+    pub adaptive_scanner: AdaptiveScanner,
 
     // Session info
     pub session_start: u64,
@@ -170,6 +342,9 @@ impl AgentMemory {
             flash_loan_amount_lamports: 500_000_000, // 0.5 SOL
             tip_pct: 0.80,
             risk_level: RiskLevel::Normal,
+
+            route_learning: HashMap::new(),
+            adaptive_scanner: AdaptiveScanner::new(),
 
             session_start: current_timestamp(),
             last_updated: current_timestamp(),
@@ -259,6 +434,170 @@ impl AgentMemory {
             self.scan_near_misses, best_spread, best_route,
             liq_info
         )
+    }
+
+    // -----------------------------------------------------------------------
+    // Route Learning - the brain of the bot
+    // -----------------------------------------------------------------------
+
+    /// Record a route scan result (success with spread data)
+    pub fn learn_route_success(&mut self, route: &str, spread_pct: f64) {
+        let entry = self.route_learning.entry(route.to_string())
+            .or_insert_with(RouteLearnEntry::new);
+        entry.record_success(spread_pct);
+    }
+
+    /// Record a route API failure (timeout, rate limit)
+    pub fn learn_route_failure(&mut self, route: &str) {
+        let entry = self.route_learning.entry(route.to_string())
+            .or_insert_with(RouteLearnEntry::new);
+        entry.record_api_failure();
+    }
+
+    /// Should this route be scanned now? Returns false if backoff is active.
+    pub fn should_scan_route(&self, route: &str) -> bool {
+        match self.route_learning.get(route) {
+            Some(entry) => !entry.should_skip(),
+            None => true, // unknown route = always try
+        }
+    }
+
+    /// Get routes sorted by priority (best first).
+    /// Returns route names the scanner should try, in order.
+    pub fn prioritized_routes(&self, all_routes: &[String]) -> Vec<String> {
+        let mut routes_with_scores: Vec<(String, f64)> = all_routes.iter().map(|r| {
+            let score = self.route_learning.get(r)
+                .map(|e| e.priority_score)
+                .unwrap_or(50.0); // unknown routes get neutral score
+            (r.clone(), score)
+        }).collect();
+
+        // Sort by priority descending (best first)
+        routes_with_scores.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        routes_with_scores.into_iter().map(|(r, _)| r).collect()
+    }
+
+    /// Get the current adaptive API delay in milliseconds
+    pub fn get_api_delay_ms(&self) -> u64 {
+        self.adaptive_scanner.api_delay_ms
+    }
+
+    /// Get the current liquidation scan interval in cycles
+    pub fn get_liq_scan_interval(&self) -> u64 {
+        self.adaptive_scanner.liq_scan_interval
+    }
+
+    /// Main adaptation cycle - call after each scan cycle.
+    /// This is where the bot LEARNS from its experience.
+    pub fn adapt_after_scan(&mut self) {
+        self.adaptive_scanner.scan_cycles += 1;
+
+        // 1. Recompute priority scores for all routes
+        for entry in self.route_learning.values_mut() {
+            entry.compute_priority();
+        }
+
+        // 2. Adapt API delay based on recent failure rate
+        let total_quotes = self.scan_quotes_ok + self.scan_quotes_failed;
+        if total_quotes > 10 {
+            let fail_rate = self.scan_quotes_failed as f64 / total_quotes as f64;
+
+            if fail_rate > 0.5 {
+                // Too many failures → slow down significantly
+                self.adaptive_scanner.api_delay_ms =
+                    (self.adaptive_scanner.api_delay_ms + 100).min(2000);
+            } else if fail_rate > 0.3 {
+                // Moderate failures → slow down a bit
+                self.adaptive_scanner.api_delay_ms =
+                    (self.adaptive_scanner.api_delay_ms + 50).min(1500);
+            } else if fail_rate < 0.1 && self.adaptive_scanner.api_delay_ms > 150 {
+                // Low failure rate → speed up cautiously
+                self.adaptive_scanner.api_delay_ms =
+                    self.adaptive_scanner.api_delay_ms.saturating_sub(25).max(150);
+            }
+        }
+
+        // 3. Adapt liquidation scan interval
+        if self.liq_scans_total > 0 {
+            let liq_fail_rate = self.liq_scans_failed as f64 / self.liq_scans_total as f64;
+            if liq_fail_rate > 0.5 {
+                // RPC can't handle it → increase interval
+                self.adaptive_scanner.liq_scan_interval =
+                    (self.adaptive_scanner.liq_scan_interval + 10).min(120);
+            } else if liq_fail_rate < 0.2 && self.liq_in_range_seen > 0 {
+                // Working well and finding things → scan more often
+                self.adaptive_scanner.liq_scan_interval =
+                    self.adaptive_scanner.liq_scan_interval.saturating_sub(5).max(15);
+            }
+        }
+
+        // 4. Adapt min_profit based on best spreads seen
+        //    If we're seeing spreads close to profitable, lower the bar slightly
+        if self.scan_best_spread_pct > -0.5 && self.scan_best_spread_pct < 0.0 {
+            // Near-miss territory: we're close. Don't raise the bar.
+            self.min_profit_usd = (self.min_profit_usd * 0.99).max(0.01);
+        }
+
+        self.adaptive_scanner.last_adapt_ts = current_timestamp();
+        self.last_updated = current_timestamp();
+
+        // Save learning state (this is the brain, must persist)
+        self.save();
+    }
+
+    /// Generate a learning report for Telegram
+    pub fn learning_report(&self) -> String {
+        let mut out = String::new();
+
+        // Top 5 routes by priority
+        let mut routes: Vec<(&String, &RouteLearnEntry)> =
+            self.route_learning.iter().collect();
+        routes.sort_by(|a, b| b.1.priority_score.partial_cmp(&a.1.priority_score)
+            .unwrap_or(std::cmp::Ordering::Equal));
+
+        if routes.is_empty() {
+            return "Sin datos de aprendizaje todavia.".to_string();
+        }
+
+        out.push_str("Aprendizaje por ruta:\n");
+
+        for (name, entry) in routes.iter().take(5) {
+            let status = if entry.should_skip() {
+                "SKIP"
+            } else if entry.times_profitable > 0 {
+                "OK"
+            } else if entry.avg_spread_pct > -0.3 {
+                "NEAR"
+            } else {
+                "WEAK"
+            };
+
+            out.push_str(&format!(
+                "\n[{}] {}\n  scans:{} fails:{} spread:{:+.3}% best:{:+.3}% pri:{:.0}\n",
+                status,
+                // Truncate long route names
+                if name.len() > 25 { &name[..25] } else { name },
+                entry.times_scanned,
+                entry.times_api_failed,
+                entry.avg_spread_pct,
+                if entry.best_spread_pct > f64::NEG_INFINITY { entry.best_spread_pct } else { 0.0 },
+                entry.priority_score,
+            ));
+        }
+
+        let skipped = routes.iter().filter(|(_, e)| e.should_skip()).count();
+        if skipped > 0 {
+            out.push_str(&format!("\n{} rutas en backoff (se saltean por fallos)\n", skipped));
+        }
+
+        out.push_str(&format!(
+            "\nAPI delay: {}ms | Liq interval: {} ciclos\nMin profit: ${:.3}",
+            self.adaptive_scanner.api_delay_ms,
+            self.adaptive_scanner.liq_scan_interval,
+            self.min_profit_usd,
+        ));
+
+        out
     }
 
     // -----------------------------------------------------------------------
