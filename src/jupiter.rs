@@ -256,6 +256,76 @@ impl Default for SlippageConfig {
 // FUNCIONES PÚBLICAS
 // =============================================================================
 
+/// Report of a single route scan attempt
+pub struct RouteScanLine {
+    pub route: String,
+    pub status: RouteScanStatus,
+}
+
+pub enum RouteScanStatus {
+    /// Got a spread result (may be positive or negative)
+    Spread { spread_pct: f64, profit_usd: f64 },
+    /// API call failed
+    Failed(String),
+    /// Skipped due to learning backoff
+    Skipped,
+}
+
+/// Full report of a scan cycle across all strategies
+pub struct ScanCycleReport {
+    pub lines: Vec<RouteScanLine>,
+    pub best: Option<(f64, String)>,
+    pub routes_scanned: u32,
+    pub routes_skipped: u32,
+    pub routes_failed: u32,
+}
+
+impl ScanCycleReport {
+    pub fn new() -> Self {
+        Self {
+            lines: Vec::new(),
+            best: None,
+            routes_scanned: 0,
+            routes_skipped: 0,
+            routes_failed: 0,
+        }
+    }
+
+    /// Format as a Telegram message (concise but complete)
+    pub fn to_telegram_message(&self, cycle: u64, api_delay_ms: u64) -> String {
+        let mut msg = format!("--- Ciclo #{} (delay:{}ms) ---\n", cycle, api_delay_ms);
+
+        for line in &self.lines {
+            match &line.status {
+                RouteScanStatus::Spread { spread_pct, profit_usd } => {
+                    let icon = if *profit_usd > 0.0 { "+" } else { "" };
+                    msg.push_str(&format!(
+                        "{} {:+.3}% ({}${:.4})\n",
+                        line.route, spread_pct, icon, profit_usd
+                    ));
+                }
+                RouteScanStatus::Failed(reason) => {
+                    msg.push_str(&format!("{} FAIL: {}\n", line.route, reason));
+                }
+                RouteScanStatus::Skipped => {
+                    msg.push_str(&format!("{} [SKIP backoff]\n", line.route));
+                }
+            }
+        }
+
+        msg.push_str(&format!(
+            "\nEscaneadas:{} Skip:{} Fail:{}",
+            self.routes_scanned, self.routes_skipped, self.routes_failed
+        ));
+
+        if let Some((profit, ref route)) = self.best {
+            msg.push_str(&format!("\nMEJOR: {} +${:.4}", route, profit));
+        }
+
+        msg
+    }
+}
+
 /// Result of a round-trip quote scan: profit in USD and spread percentage.
 pub struct QuoteScanResult {
     /// Profit in USD (negative means loss)
@@ -359,6 +429,7 @@ pub const JUP_MINT: &str = "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN";
 
 /// Busca arbitrage en múltiples pares, priorizando rutas que el bot aprendió son mejores.
 /// Salta rutas en backoff (por fallos anteriores). Adapta delays según experiencia.
+#[allow(dead_code)]
 pub async fn scan_arbitrage_opportunities(
     base_mint: &str,
     amount: u64,
@@ -645,54 +716,337 @@ pub async fn scan_lst_premium(amount: u64, memory: &mut AgentMemory) -> Option<(
 // MASTER SCANNER: ALL STRATEGIES
 // =============================================================================
 
-/// Runs ALL arbitrage strategies and returns the single best opportunity.
-/// Updates scan metrics in agent memory for Telegram reporting.
-pub async fn scan_all_strategies(amount: u64, memory: &mut AgentMemory) -> Option<(f64, String)> {
+/// Runs ALL arbitrage strategies and returns a full scan report.
+/// The report contains every route attempted, its result, and the best opportunity.
+pub async fn scan_all_strategies(amount: u64, memory: &mut AgentMemory) -> ScanCycleReport {
     utils::log_info("Escaneando estrategias...");
 
-    let mut best: Option<(f64, String)> = None;
+    let mut report = ScanCycleReport::new();
 
     // Strategy 1: Simple round-trip (9 pairs)
-    if let Some((p, r)) = scan_arbitrage_opportunities(USDC_MINT, amount, memory).await {
-        utils::log_success(&format!("  [round-trip] {} = +${:.4}", r, p));
-        best = Some((p, r));
-    }
+    scan_arbitrage_with_report(USDC_MINT, amount, memory, &mut report).await;
 
     // Strategy 2: Triangular (7 paths)
-    if let Some((p, r)) = scan_triangular_arbitrage(amount, memory).await {
-        utils::log_success(&format!("  [triangular] {} = +${:.4}", r, p));
-        match &best {
-            Some((b, _)) if p <= *b => {}
-            _ => { best = Some((p, r)); }
-        }
-    }
+    scan_triangular_with_report(amount, memory, &mut report).await;
 
     // Strategy 3: Stablecoin depeg
-    if let Some((p, r)) = scan_stablecoin_arb(amount, memory).await {
-        utils::log_success(&format!("  [stablecoin] {} = +${:.4}", r, p));
-        match &best {
-            Some((b, _)) if p <= *b => {}
-            _ => { best = Some((p, r)); }
-        }
-    }
+    scan_stablecoin_with_report(amount, memory, &mut report).await;
 
     // Strategy 4: LST premium
-    if let Some((p, r)) = scan_lst_premium(amount, memory).await {
-        utils::log_success(&format!("  [LST] {} = +${:.4}", r, p));
-        match &best {
-            Some((b, _)) if p <= *b => {}
-            _ => { best = Some((p, r)); }
+    scan_lst_with_report(amount, memory, &mut report).await;
+
+    if let Some((p, ref r)) = report.best {
+        utils::log_success(&format!("MEJOR: {} = +${:.4}", r, p));
+    }
+
+    report
+}
+
+/// Round-trip scan that populates the report
+async fn scan_arbitrage_with_report(
+    base_mint: &str, amount: u64, memory: &mut AgentMemory, report: &mut ScanCycleReport,
+) {
+    let intermediates: Vec<(&str, &str)> = vec![
+        (SOL_MINT, "SOL"), (MSOL_MINT, "mSOL"), (JITOSOL_MINT, "jitoSOL"),
+        (USDT_MINT, "USDT"), (BSOL_MINT, "bSOL"), (BONK_MINT, "BONK"),
+        (RAY_MINT, "RAY"), (WIF_MINT, "WIF"), (JUP_MINT, "JUP"),
+    ];
+
+    let route_names: Vec<String> = intermediates.iter()
+        .map(|(_, sym)| format!("USDC->{}->USDC", sym)).collect();
+    let prioritized = memory.prioritized_routes(&route_names);
+    let api_delay = memory.get_api_delay_ms();
+
+    for route_name in &prioritized {
+        let (mint, _) = match intermediates.iter()
+            .find(|(_, sym)| route_name == &format!("USDC->{}->USDC", sym))
+        {
+            Some(pair) => pair,
+            None => continue,
+        };
+
+        if !memory.should_scan_route(route_name) {
+            report.routes_skipped += 1;
+            report.lines.push(RouteScanLine {
+                route: route_name.clone(),
+                status: RouteScanStatus::Skipped,
+            });
+            continue;
+        }
+
+        report.routes_scanned += 1;
+
+        match get_best_jupiter_quote(base_mint, mint, amount).await {
+            Ok(result) => {
+                memory.scan_quotes_ok += result.quotes_ok;
+                memory.record_scan_spread(result.spread_pct, route_name);
+                memory.learn_route_success(route_name, result.spread_pct);
+
+                report.lines.push(RouteScanLine {
+                    route: route_name.clone(),
+                    status: RouteScanStatus::Spread {
+                        spread_pct: result.spread_pct,
+                        profit_usd: result.profit_usd,
+                    },
+                });
+
+                if result.profit_usd > config::MIN_PROFIT_USD {
+                    match &report.best {
+                        Some((b, _)) if result.profit_usd <= *b => {}
+                        _ => { report.best = Some((result.profit_usd, route_name.clone())); }
+                    }
+                }
+            }
+            Err(e) => {
+                memory.scan_quotes_failed += 1;
+                memory.learn_route_failure(route_name);
+                report.routes_failed += 1;
+                report.lines.push(RouteScanLine {
+                    route: route_name.clone(),
+                    status: RouteScanStatus::Failed(e),
+                });
+            }
+        }
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(api_delay)).await;
+    }
+}
+
+/// Triangular scan that populates the report
+async fn scan_triangular_with_report(
+    amount: u64, memory: &mut AgentMemory, report: &mut ScanCycleReport,
+) {
+    let slippage = SlippageConfig::default();
+    let flash_fee = amount * 9 / 10_000;
+    let api_delay = memory.get_api_delay_ms();
+
+    let triangles: Vec<(&str, &str, &str, &str)> = vec![
+        (SOL_MINT, MSOL_MINT, "SOL", "mSOL"),
+        (SOL_MINT, JITOSOL_MINT, "SOL", "jitoSOL"),
+        (SOL_MINT, BSOL_MINT, "SOL", "bSOL"),
+        (MSOL_MINT, JITOSOL_MINT, "mSOL", "jitoSOL"),
+        (SOL_MINT, BONK_MINT, "SOL", "BONK"),
+        (SOL_MINT, WIF_MINT, "SOL", "WIF"),
+        (SOL_MINT, JUP_MINT, "SOL", "JUP"),
+    ];
+
+    for (mid1, mid2, sym1, sym2) in &triangles {
+        let route = format!("USDC->{}->{}->USDC", sym1, sym2);
+
+        if !memory.should_scan_route(&route) {
+            report.routes_skipped += 1;
+            report.lines.push(RouteScanLine { route: route.clone(), status: RouteScanStatus::Skipped });
+            continue;
+        }
+
+        report.routes_scanned += 1;
+
+        let q1 = match get_jupiter_quote_with_slippage(USDC_MINT, mid1, amount, &slippage).await {
+            Ok(q) => { memory.record_quote_ok(); q }
+            Err(e) => {
+                memory.record_quote_failed(); memory.learn_route_failure(&route);
+                report.routes_failed += 1;
+                report.lines.push(RouteScanLine { route, status: RouteScanStatus::Failed(e) });
+                continue;
+            }
+        };
+        let amt1 = q1.out_amount.parse::<u64>().unwrap_or(0);
+        if amt1 == 0 { continue; }
+        tokio::time::sleep(tokio::time::Duration::from_millis(api_delay)).await;
+
+        let q2 = match get_jupiter_quote_with_slippage(mid1, mid2, amt1, &slippage).await {
+            Ok(q) => { memory.record_quote_ok(); q }
+            Err(e) => {
+                memory.record_quote_failed(); memory.learn_route_failure(&route);
+                report.routes_failed += 1;
+                report.lines.push(RouteScanLine { route, status: RouteScanStatus::Failed(e) });
+                continue;
+            }
+        };
+        let amt2 = q2.out_amount.parse::<u64>().unwrap_or(0);
+        if amt2 == 0 { continue; }
+        tokio::time::sleep(tokio::time::Duration::from_millis(api_delay)).await;
+
+        let q3 = match get_jupiter_quote_with_slippage(mid2, USDC_MINT, amt2, &slippage).await {
+            Ok(q) => { memory.record_quote_ok(); q }
+            Err(e) => {
+                memory.record_quote_failed(); memory.learn_route_failure(&route);
+                report.routes_failed += 1;
+                report.lines.push(RouteScanLine { route, status: RouteScanStatus::Failed(e) });
+                continue;
+            }
+        };
+        let final_amt = q3.out_amount.parse::<u64>().unwrap_or(0);
+
+        let total_cost = amount + flash_fee;
+        let profit_raw = final_amt as i64 - total_cost as i64;
+        let spread_pct = profit_raw as f64 / amount as f64 * 100.0;
+        let profit_usd = profit_raw as f64 / 1_000_000.0;
+
+        memory.record_scan_spread(spread_pct, &route);
+        memory.learn_route_success(&route, spread_pct);
+
+        report.lines.push(RouteScanLine {
+            route: route.clone(),
+            status: RouteScanStatus::Spread { spread_pct, profit_usd },
+        });
+
+        if final_amt > total_cost {
+            match &report.best {
+                Some((b, _)) if profit_usd <= *b => {}
+                _ => { report.best = Some((profit_usd, route)); }
+            }
+        }
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(api_delay)).await;
+    }
+}
+
+/// Stablecoin depeg scan that populates the report
+async fn scan_stablecoin_with_report(
+    amount: u64, memory: &mut AgentMemory, report: &mut ScanCycleReport,
+) {
+    let slippage = SlippageConfig::default();
+    let flash_fee = amount * 9 / 10_000;
+    let route = "USDC->USDT->USDC (depeg)".to_string();
+    let api_delay = memory.get_api_delay_ms();
+
+    if !memory.should_scan_route(&route) {
+        report.routes_skipped += 1;
+        report.lines.push(RouteScanLine { route, status: RouteScanStatus::Skipped });
+        return;
+    }
+
+    report.routes_scanned += 1;
+
+    let q1 = match get_jupiter_quote_with_slippage(USDC_MINT, USDT_MINT, amount, &slippage).await {
+        Ok(q) => { memory.record_quote_ok(); q }
+        Err(e) => {
+            memory.record_quote_failed(); memory.learn_route_failure(&route);
+            report.routes_failed += 1;
+            report.lines.push(RouteScanLine { route, status: RouteScanStatus::Failed(e) });
+            return;
+        }
+    };
+    let usdt_amount = q1.out_amount.parse::<u64>().unwrap_or(0);
+    if usdt_amount == 0 { return; }
+
+    tokio::time::sleep(tokio::time::Duration::from_millis(api_delay)).await;
+
+    let q2 = match get_jupiter_quote_with_slippage(USDT_MINT, USDC_MINT, usdt_amount, &slippage).await {
+        Ok(q) => { memory.record_quote_ok(); q }
+        Err(e) => {
+            memory.record_quote_failed(); memory.learn_route_failure(&route);
+            report.routes_failed += 1;
+            report.lines.push(RouteScanLine { route, status: RouteScanStatus::Failed(e) });
+            return;
+        }
+    };
+    let final_usdc = q2.out_amount.parse::<u64>().unwrap_or(0);
+
+    let total_cost = amount + flash_fee;
+    let profit_raw = final_usdc as i64 - total_cost as i64;
+    let spread_pct = profit_raw as f64 / amount as f64 * 100.0;
+    let profit_usd = profit_raw as f64 / 1_000_000.0;
+
+    memory.record_scan_spread(spread_pct, &route);
+    memory.learn_route_success(&route, spread_pct);
+
+    report.lines.push(RouteScanLine {
+        route: route.clone(),
+        status: RouteScanStatus::Spread { spread_pct, profit_usd },
+    });
+
+    if final_usdc > total_cost && profit_usd > 0.01 {
+        match &report.best {
+            Some((b, _)) if profit_usd <= *b => {}
+            _ => { report.best = Some((profit_usd, route)); }
         }
     }
+}
 
-    if let Some((p, ref r)) = best {
-        utils::log_success(&format!("MEJOR: {} = +${:.4}", r, p));
-    } else {
-        let scan_info = memory.scan_summary();
-        utils::log_info(&format!("  Sin oportunidades rentables. {}", scan_info));
+/// LST premium scan that populates the report
+async fn scan_lst_with_report(
+    amount: u64, memory: &mut AgentMemory, report: &mut ScanCycleReport,
+) {
+    let slippage = SlippageConfig::default();
+    let flash_fee = amount * 9 / 10_000;
+    let api_delay = memory.get_api_delay_ms();
+
+    let lst_tokens: Vec<(&str, &str)> = vec![
+        (MSOL_MINT, "mSOL"), (JITOSOL_MINT, "jitoSOL"), (BSOL_MINT, "bSOL"),
+    ];
+
+    for (lst_mint, symbol) in &lst_tokens {
+        let route = format!("USDC->{}->SOL->USDC (LST)", symbol);
+
+        if !memory.should_scan_route(&route) {
+            report.routes_skipped += 1;
+            report.lines.push(RouteScanLine { route, status: RouteScanStatus::Skipped });
+            continue;
+        }
+
+        report.routes_scanned += 1;
+
+        let q1 = match get_jupiter_quote_with_slippage(USDC_MINT, lst_mint, amount, &slippage).await {
+            Ok(q) => { memory.record_quote_ok(); q }
+            Err(e) => {
+                memory.record_quote_failed(); memory.learn_route_failure(&route);
+                report.routes_failed += 1;
+                report.lines.push(RouteScanLine { route, status: RouteScanStatus::Failed(e) });
+                continue;
+            }
+        };
+        let lst_amt = q1.out_amount.parse::<u64>().unwrap_or(0);
+        if lst_amt == 0 { continue; }
+        tokio::time::sleep(tokio::time::Duration::from_millis(api_delay)).await;
+
+        let q2 = match get_jupiter_quote_with_slippage(lst_mint, SOL_MINT, lst_amt, &slippage).await {
+            Ok(q) => { memory.record_quote_ok(); q }
+            Err(e) => {
+                memory.record_quote_failed(); memory.learn_route_failure(&route);
+                report.routes_failed += 1;
+                report.lines.push(RouteScanLine { route, status: RouteScanStatus::Failed(e) });
+                continue;
+            }
+        };
+        let sol_amt = q2.out_amount.parse::<u64>().unwrap_or(0);
+        if sol_amt == 0 { continue; }
+        tokio::time::sleep(tokio::time::Duration::from_millis(api_delay)).await;
+
+        let q3 = match get_jupiter_quote_with_slippage(SOL_MINT, USDC_MINT, sol_amt, &slippage).await {
+            Ok(q) => { memory.record_quote_ok(); q }
+            Err(e) => {
+                memory.record_quote_failed(); memory.learn_route_failure(&route);
+                report.routes_failed += 1;
+                report.lines.push(RouteScanLine { route, status: RouteScanStatus::Failed(e) });
+                continue;
+            }
+        };
+        let final_usdc = q3.out_amount.parse::<u64>().unwrap_or(0);
+
+        let total_cost = amount + flash_fee;
+        let profit_raw = final_usdc as i64 - total_cost as i64;
+        let spread_pct = profit_raw as f64 / amount as f64 * 100.0;
+        let profit_usd = profit_raw as f64 / 1_000_000.0;
+
+        memory.record_scan_spread(spread_pct, &route);
+        memory.learn_route_success(&route, spread_pct);
+
+        report.lines.push(RouteScanLine {
+            route: route.clone(),
+            status: RouteScanStatus::Spread { spread_pct, profit_usd },
+        });
+
+        if final_usdc > total_cost {
+            match &report.best {
+                Some((b, _)) if profit_usd <= *b => {}
+                _ => { report.best = Some((profit_usd, route)); }
+            }
+        }
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(api_delay)).await;
     }
-
-    best
 }
 
 /// Obtiene un quote detallado de Jupiter con slippage configurable

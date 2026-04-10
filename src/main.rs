@@ -189,37 +189,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // STRATEGY 1: ALL arbitrage strategies (round-trip, triangular, stablecoin, LST)
             let flash_amount = strategy.get_flash_amount(&agent_memory);
 
-            match jupiter::scan_all_strategies(flash_amount, &mut agent_memory).await {
-                Some((profit, route)) => {
-                    let decision = strategy.evaluate_arbitrage(&agent_memory, profit, 0.0);
-                    if let Action::Go = decision.action {
-                        agent_memory.total_opportunities += 1;
-                        telegram.notify_opportunity("Arbitrage", profit,
-                            &format!("{} | Confianza: {:.0}%", route, decision.confidence * 100.0)).await;
+            let scan_report = jupiter::scan_all_strategies(flash_amount, &mut agent_memory).await;
 
-                        match flash_loan::build_flash_loan_tx(&client, &keypair, flash_amount).await {
-                            Ok(Some(tx)) => {
-                                let success = match bundle::send_jito_bundle(tx, &keypair, profit).await {
-                                    Ok(id) => { telegram.notify_execution(&id, profit).await; true }
-                                    Err(_) => false,
-                                };
-                                agent_memory.record_opportunity(OpportunityRecord {
-                                    timestamp: memory::current_timestamp(),
-                                    strategy: "arbitrage".into(),
-                                    route: route.clone(),
-                                    estimated_profit_usd: profit,
-                                    actual_profit_usd: if success && !config::DRY_RUN { profit } else { 0.0 },
-                                    success,
-                                    congestion_level: 0.5,
-                                    tip_lamports: 0,
-                                    hour_utc: (memory::current_timestamp() / 3600 % 24) as u8,
-                                });
-                            }
-                            _ => {}
+            // Send scan report to Telegram every cycle so user sees everything
+            let tg_msg = scan_report.to_telegram_message(cycle, agent_memory.get_api_delay_ms());
+            telegram.send_message(&tg_msg).await;
+
+            // If we found a profitable opportunity, evaluate and try to execute
+            if let Some((profit, ref route)) = scan_report.best {
+                let decision = strategy.evaluate_arbitrage(&agent_memory, profit, 0.0);
+                if let Action::Go = decision.action {
+                    agent_memory.total_opportunities += 1;
+                    telegram.send_alert(&format!(
+                        "OPORTUNIDAD #{}\n{}\nProfit: +${:.4}\nConfianza: {:.0}%\nEjecutando...",
+                        agent_memory.total_opportunities, route, profit, decision.confidence * 100.0
+                    )).await;
+
+                    match flash_loan::build_flash_loan_tx(&client, &keypair, flash_amount).await {
+                        Ok(Some(tx)) => {
+                            let success = match bundle::send_jito_bundle(tx, &keypair, profit).await {
+                                Ok(id) => {
+                                    telegram.send_alert(&format!("EJECUTADO\nBundle: {}\nProfit: +${:.4}", id, profit)).await;
+                                    true
+                                }
+                                Err(e) => {
+                                    telegram.send_alert(&format!("FALLO ejecucion: {}", e)).await;
+                                    false
+                                }
+                            };
+                            agent_memory.record_opportunity(OpportunityRecord {
+                                timestamp: memory::current_timestamp(),
+                                strategy: "arbitrage".into(),
+                                route: route.clone(),
+                                estimated_profit_usd: profit,
+                                actual_profit_usd: if success && !config::DRY_RUN { profit } else { 0.0 },
+                                success,
+                                congestion_level: 0.5,
+                                tip_lamports: 0,
+                                hour_utc: (memory::current_timestamp() / 3600 % 24) as u8,
+                            });
+                        }
+                        Ok(None) => {
+                            telegram.send_alert("FALLO: No se pudo construir flash loan TX").await;
+                        }
+                        Err(e) => {
+                            telegram.send_alert(&format!("FALLO flash loan: {}", e)).await;
                         }
                     }
+                } else {
+                    // Strategy engine rejected it - tell user why
+                    telegram.send_message(&format!(
+                        "Oportunidad rechazada: {} +${:.4}\nRazon: {}", route, profit, decision.reason
+                    )).await;
                 }
-                None => {}
             }
 
             // STRATEGY 2: Liquidations (throttled with adaptive interval)
@@ -237,25 +259,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     has_error,
                 );
 
+                // Always report liquidation scan results
                 if let Some(ref err) = scan_result.scan_error {
-                    // Only notify on first error or if error changed
-                    if last_liq_error.as_deref() != Some(err) {
-                        telegram.send_message(&format!(
-                            "Liquidation scan error:\n{}", err
-                        )).await;
-                        last_liq_error = Some(err.clone());
-                    }
+                    telegram.send_message(&format!(
+                        "--- Liq Scan #{} ---\nERROR: {}", cycle, err
+                    )).await;
+                    last_liq_error = Some(err.clone());
                 } else {
                     last_liq_error = None;
-                    if scan_result.total_obligations_fetched > 0 {
-                        utils::log_info(&format!(
-                            "Liq scan: {} obligaciones, {} con deuda, {} en rango, {} liquidables",
-                            scan_result.total_obligations_fetched,
-                            scan_result.total_with_debt,
-                            scan_result.total_in_range,
-                            scan_result.opportunities.len()
-                        ));
-                    }
+                    telegram.send_message(&format!(
+                        "--- Liq Scan #{} ---\nObligaciones: {}\nCon deuda: {}\nEn rango $10-$500: {}\nLiquidables: {}",
+                        cycle,
+                        scan_result.total_obligations_fetched,
+                        scan_result.total_with_debt,
+                        scan_result.total_in_range,
+                        scan_result.opportunities.len()
+                    )).await;
                 }
 
                 for opp in &scan_result.opportunities {
@@ -265,10 +284,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                     if let Action::Go = decision.action {
                         agent_memory.total_opportunities += 1;
-                        telegram.notify_opportunity("Liquidacion", opp.estimated_profit_usd,
-                            &format!("HF: {:.4} | Deuda: ${:.2}", opp.health_factor, opp.borrow_factor_adjusted_debt_usd)).await;
+                        telegram.send_alert(&format!(
+                            "LIQUIDACION #{}\nHF: {:.4}\nDeuda: ${:.2}\nProfit est: ${:.2}\nEjecutando...",
+                            agent_memory.total_opportunities, opp.health_factor,
+                            opp.borrow_factor_adjusted_debt_usd, opp.estimated_profit_usd
+                        )).await;
 
                         if config::DRY_RUN {
+                            telegram.send_message(&format!(
+                                "DRY RUN: Liquidacion simulada OK (no se envio TX real)"
+                            )).await;
                             agent_memory.record_opportunity(OpportunityRecord {
                                 timestamp: memory::current_timestamp(),
                                 strategy: "liquidation".into(),
@@ -299,6 +324,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                         }
+                    } else {
+                        // Strategy engine rejected - tell user why
+                        telegram.send_message(&format!(
+                            "Liq rechazada: HF:{:.4} Deuda:${:.2}\nRazon: {}",
+                            opp.health_factor, opp.borrow_factor_adjusted_debt_usd, decision.reason
+                        )).await;
                     }
                 }
             }
