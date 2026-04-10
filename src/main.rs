@@ -1,3 +1,4 @@
+mod api;
 mod bundle;
 mod config;
 mod flash_loan;
@@ -11,8 +12,10 @@ mod utils;
 use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::signature::Signer;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 use tokio::time::{sleep, Duration};
 
+use api::{ApiCommand, BotState, SharedState};
 use memory::{AgentMemory, OpportunityRecord};
 use strategy::{StrategyEngine, Action};
 use telegram::{TelegramBot, BotCommand};
@@ -69,25 +72,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Err(_) => 0.0,
     };
 
-    // Health server for HuggingFace Spaces (port 7860)
-    let health_port = config::get_health_port();
-    tokio::spawn(async move {
-        use tokio::net::TcpListener;
-        use tokio::io::AsyncWriteExt;
-        if let Ok(listener) = TcpListener::bind(format!("0.0.0.0:{}", health_port)).await {
-            utils::log_info(&format!("Health server :{}", health_port));
-            loop {
-                if let Ok((mut s, _)) = listener.accept().await {
-                    let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK").await;
-                }
-            }
-        }
-    });
-
     let build_id = format!("v{}-nobackoff", env!("CARGO_PKG_VERSION"));
     telegram.notify_started(&user_pubkey.to_string(), sol_balance, &build_id).await;
 
-    let mut running = true;
+    // Shared state for API server
+    let shared_state: SharedState = Arc::new(RwLock::new(
+        BotState::new(agent_memory, build_id.clone())
+    ));
+
+    // Start API server (replaces simple health server)
+    let health_port = config::get_health_port();
+    let api_state = shared_state.clone();
+    tokio::spawn(async move {
+        api::start_api_server(api_state, health_port).await;
+    });
+
     let mut last_summary_cycle: u64 = 0;
     let mut last_liq_scan_cycle: u64 = 0;
     let mut last_liq_error: Option<String> = None;
@@ -97,7 +96,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // MAIN LOOP - 24/7 Autonomous Agent
     // ====================================================================
     loop {
-        agent_memory.record_cycle();
+        // Sync state from shared (API may have changed things)
+        let mut agent_memory;
+        let mut running;
+        {
+            let mut s = shared_state.write().await;
+
+            // Process any pending API commands
+            let cmds: Vec<_> = s.pending_commands.drain(..).collect();
+            for cmd in cmds {
+                match cmd {
+                    ApiCommand::SetRunning(v) => {
+                        s.running = v;
+                        s.log(&format!("Running set to {}", v));
+                    }
+                    ApiCommand::SetRisk(level) => {
+                        s.memory.set_risk_level(level);
+                        s.log(&format!("Risk set to {:?}", level));
+                    }
+                    ApiCommand::ResetMemory => {
+                        s.memory.reset();
+                        s.log("Memory reset");
+                    }
+                    ApiCommand::SetMinProfit(val) => {
+                        s.memory.min_profit_usd = val;
+                        s.log(&format!("Min profit set to {:.4}", val));
+                    }
+                    ApiCommand::ForceScan => {
+                        s.log("Force scan requested");
+                    }
+                }
+            }
+
+            s.memory.record_cycle();
+            s.cycle = s.memory.total_cycles;
+            agent_memory = s.memory.clone();
+            running = s.running;
+        }
         let cycle = agent_memory.total_cycles;
 
         // 1. Poll Telegram commands
@@ -197,9 +232,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let scan_report = jupiter::scan_all_strategies(flash_amount, &mut agent_memory).await;
 
-            // Send scan report to Telegram (only when there's actual activity)
+            // Send scan report to Telegram and save to shared state
+            let tg_msg = scan_report.to_telegram_message(cycle, agent_memory.get_api_delay_ms());
+            {
+                let mut s = shared_state.write().await;
+                s.last_scan_report = tg_msg.clone();
+                s.log(&format!("Scan: {} scanned, {} skipped, {} failed", scan_report.routes_scanned, scan_report.routes_skipped, scan_report.routes_failed));
+            }
             if scan_report.routes_scanned > 0 || cycle % 30 == 0 {
-                let tg_msg = scan_report.to_telegram_message(cycle, agent_memory.get_api_delay_ms());
                 telegram.send_message(&tg_msg).await;
             }
 
@@ -267,23 +307,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     has_error,
                 );
 
-                // Always report liquidation scan results
-                if let Some(ref err) = scan_result.scan_error {
-                    telegram.send_message(&format!(
-                        "--- Liq Scan #{} ---\nERROR: {}", cycle, err
-                    )).await;
+                // Report liquidation scan results
+                let liq_msg = if let Some(ref err) = scan_result.scan_error {
                     last_liq_error = Some(err.clone());
+                    format!("--- Liq Scan #{} ---\nERROR: {}", cycle, err)
                 } else {
                     last_liq_error = None;
-                    telegram.send_message(&format!(
+                    format!(
                         "--- Liq Scan #{} ---\nObligaciones: {}\nCon deuda: {}\nEn rango $10-$500: {}\nLiquidables: {}",
                         cycle,
                         scan_result.total_obligations_fetched,
                         scan_result.total_with_debt,
                         scan_result.total_in_range,
                         scan_result.opportunities.len()
-                    )).await;
+                    )
+                };
+                {
+                    let mut s = shared_state.write().await;
+                    s.last_liq_report = liq_msg.clone();
+                    s.log(&format!("Liq: {} fetched, {} liquidable", scan_result.total_obligations_fetched, scan_result.opportunities.len()));
                 }
+                telegram.send_message(&liq_msg).await;
 
                 for opp in &scan_result.opportunities {
                     let decision = strategy.evaluate_liquidation(
@@ -364,10 +408,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        // 3. Persist memory (every 5 cycles, or after opportunities via record_opportunity)
+        // 3. Sync state back to shared (API can read it)
+        {
+            let mut s = shared_state.write().await;
+            s.memory = agent_memory.clone();
+            s.running = running;
+            s.cycle = cycle;
+        }
+
+        // 4. Persist memory (every 5 cycles)
         if cycle % 5 == 0 { agent_memory.save(); }
 
-        // 4. Telegram summary every ~30 min (360 cycles * 5s)
+        // 5. Telegram summary every ~30 min (360 cycles * 5s)
         if cycle - last_summary_cycle >= 360 {
             last_summary_cycle = cycle;
             let scan_info = agent_memory.scan_summary();
@@ -376,7 +428,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )).await;
         }
 
-        // 5. Adaptive delay
+        // 6. Adaptive delay
         sleep(Duration::from_secs(strategy.get_cycle_delay_secs(&agent_memory))).await;
     }
 }
