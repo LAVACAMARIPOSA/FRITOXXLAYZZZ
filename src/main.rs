@@ -103,10 +103,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     telegram.send_alert("Agente PAUSADO").await;
                 }
                 BotCommand::Status => {
+                    let scan_info = agent_memory.scan_summary();
                     telegram.send_message(&format!(
-                        "Ciclo: {}\nActivo: {}\nRiesgo: {:?}\nProfit: ${:.2}\nOportunidades: {}",
+                        "Ciclo: {}\nActivo: {}\nRiesgo: {:?}\nProfit: ${:.2}\nOportunidades: {}\n\n--- Scanner ---\n{}",
                         cycle, running, agent_memory.risk_level,
-                        agent_memory.total_profit_usd, agent_memory.total_opportunities
+                        agent_memory.total_profit_usd, agent_memory.total_opportunities,
+                        scan_info
                     )).await;
                 }
                 BotCommand::Stats => {
@@ -179,9 +181,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             // STRATEGY 1: ALL arbitrage strategies (round-trip, triangular, stablecoin, LST)
             let flash_amount = strategy.get_flash_amount(&agent_memory);
 
-            match jupiter::scan_all_strategies(flash_amount).await {
+            match jupiter::scan_all_strategies(flash_amount, &mut agent_memory).await {
                 Some((profit, route)) => {
-                    let decision = strategy.evaluate_arbitrage(&agent_memory, profit, 0.5);
+                    let decision = strategy.evaluate_arbitrage(&agent_memory, profit, 0.0);
                     if let Action::Go = decision.action {
                         agent_memory.total_opportunities += 1;
                         telegram.notify_opportunity("Arbitrage", profit,
@@ -276,7 +278,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // 4. Telegram summary every ~30 min (360 cycles * 5s)
         if cycle - last_summary_cycle >= 360 {
             last_summary_cycle = cycle;
-            telegram.notify_summary(&agent_memory.summary()).await;
+            let scan_info = agent_memory.scan_summary();
+            telegram.notify_summary(&format!(
+                "{}\n\n--- Scanner ---\n{}", agent_memory.summary(), scan_info
+            )).await;
         }
 
         // 5. Adaptive delay

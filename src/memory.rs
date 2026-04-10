@@ -113,6 +113,18 @@ pub struct AgentMemory {
     pub session_start: u64,
     pub last_updated: u64,
     pub version: u32,
+
+    // Scan metrics (not persisted, reset each session)
+    #[serde(skip)]
+    pub scan_quotes_ok: u64,
+    #[serde(skip)]
+    pub scan_quotes_failed: u64,
+    #[serde(skip)]
+    pub scan_near_misses: u64,
+    #[serde(skip)]
+    pub scan_best_spread_pct: f64,
+    #[serde(skip)]
+    pub scan_best_spread_route: String,
 }
 
 const MEMORY_PATH: &str = "data/memory.json";
@@ -150,7 +162,60 @@ impl AgentMemory {
             session_start: current_timestamp(),
             last_updated: current_timestamp(),
             version: 1,
+
+            scan_quotes_ok: 0,
+            scan_quotes_failed: 0,
+            scan_near_misses: 0,
+            scan_best_spread_pct: f64::NEG_INFINITY,
+            scan_best_spread_route: String::new(),
         }
+    }
+
+    /// Record a successful Jupiter quote
+    pub fn record_quote_ok(&mut self) {
+        self.scan_quotes_ok += 1;
+    }
+
+    /// Record a failed Jupiter quote
+    pub fn record_quote_failed(&mut self) {
+        self.scan_quotes_failed += 1;
+    }
+
+    /// Record a scan result (spread as percentage, e.g., -0.3 means 0.3% loss)
+    pub fn record_scan_spread(&mut self, spread_pct: f64, route: &str) {
+        if spread_pct > self.scan_best_spread_pct {
+            self.scan_best_spread_pct = spread_pct;
+            self.scan_best_spread_route = route.to_string();
+        }
+        // A "near miss" is a spread between -0.5% and 0% (close to profitable)
+        if spread_pct > -0.5 && spread_pct <= 0.0 {
+            self.scan_near_misses += 1;
+        }
+    }
+
+    /// Get scan metrics summary for Telegram
+    pub fn scan_summary(&self) -> String {
+        let total_quotes = self.scan_quotes_ok + self.scan_quotes_failed;
+        let success_rate = if total_quotes > 0 {
+            self.scan_quotes_ok as f64 / total_quotes as f64 * 100.0
+        } else {
+            0.0
+        };
+        let best_spread = if self.scan_best_spread_pct > f64::NEG_INFINITY {
+            format!("{:+.3}%", self.scan_best_spread_pct)
+        } else {
+            "N/A".to_string()
+        };
+        let best_route = if self.scan_best_spread_route.is_empty() {
+            "N/A".to_string()
+        } else {
+            self.scan_best_spread_route.clone()
+        };
+        format!(
+            "Quotes: {}/{} OK ({:.0}%)\nNear-misses: {}\nMejor spread: {} ({})",
+            self.scan_quotes_ok, total_quotes, success_rate,
+            self.scan_near_misses, best_spread, best_route
+        )
     }
 
     // -----------------------------------------------------------------------

@@ -8,7 +8,7 @@ use solana_sdk::{
     signer::Signer,
     transaction::VersionedTransaction,
 };
-use crate::{config, utils};
+use crate::{config, memory::AgentMemory, utils};
 
 /// Base URL para la API de Jupiter v6
 const JUPITER_API_BASE: &str = "https://quote-api.jup.ag/v6";
@@ -256,16 +256,29 @@ impl Default for SlippageConfig {
 // FUNCIONES PÚBLICAS
 // =============================================================================
 
+/// Result of a round-trip quote scan: profit in USD and spread percentage.
+pub struct QuoteScanResult {
+    /// Profit in USD (negative means loss)
+    pub profit_usd: f64,
+    /// Spread as a percentage of the input amount
+    pub spread_pct: f64,
+    /// Number of successful quotes in this scan
+    pub quotes_ok: u64,
+    /// Number of failed quotes in this scan
+    pub quotes_failed: u64,
+}
+
 /// Busca oportunidades de arbitrage haciendo un round-trip:
 /// USDC -> intermediate_token -> USDC
 ///
 /// Compara lo que sale al final vs lo que entró (ambos en USDC).
-/// Si hay profit después de fees, retorna el profit en USD.
+/// Always returns the spread info (even when unprofitable) for metrics.
+/// Returns Ok(Some(profit)) if profitable, Ok(None) if not, Err if both quotes failed.
 pub async fn get_best_jupiter_quote(
     input_mint: &str,
     output_mint: &str,
     amount: u64,
-) -> Option<f64> {
+) -> Result<QuoteScanResult, String> {
     let slippage_config = SlippageConfig::default();
 
     // Leg 1: USDC -> intermediate (e.g. SOL)
@@ -274,15 +287,17 @@ pub async fn get_best_jupiter_quote(
     ).await {
         Ok(q) => q,
         Err(e) => {
-            utils::log_error(&format!("Quote leg1 error: {}", e));
-            return None;
+            return Err(format!("leg1: {}", e));
         }
     };
 
     let intermediate_amount = quote_leg1.out_amount.parse::<u64>().unwrap_or(0);
     if intermediate_amount == 0 {
-        return None;
+        return Err("leg1 returned 0".to_string());
     }
+
+    // Small delay between legs to avoid rate limiting
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
     // Leg 2: intermediate -> USDC (back to start)
     let quote_leg2 = match get_jupiter_quote_with_slippage(
@@ -290,24 +305,19 @@ pub async fn get_best_jupiter_quote(
     ).await {
         Ok(q) => q,
         Err(e) => {
-            utils::log_error(&format!("Quote leg2 error: {}", e));
-            return None;
+            return Err(format!("leg2: {}", e));
         }
     };
 
     let final_amount = quote_leg2.out_amount.parse::<u64>().unwrap_or(0);
 
-    // Profit = what we got back - what we started with (both in USDC, 6 decimals)
-    // Also subtract flash loan fee (0.09% of amount)
+    // Calculate spread including flash loan fee
     let flash_fee = amount * 9 / 10_000; // 0.09%
     let total_cost = amount + flash_fee;
 
-    if final_amount <= total_cost {
-        return None;
-    }
-
-    let profit_raw = final_amount - total_cost;
-    let profit_usd = profit_raw as f64 / 1_000_000.0; // USDC has 6 decimals
+    let profit_raw = final_amount as i64 - total_cost as i64;
+    let profit_usd = profit_raw as f64 / 1_000_000.0;
+    let spread_pct = profit_raw as f64 / amount as f64 * 100.0;
 
     if profit_usd > config::MIN_PROFIT_USD {
         let impact1 = &quote_leg1.price_impact_pct;
@@ -316,10 +326,14 @@ pub async fn get_best_jupiter_quote(
             "Arbitrage round-trip: ${:.4} profit (impacts: {}% / {}%)",
             profit_usd, impact1, impact2
         ));
-        return Some(profit_usd);
     }
 
-    None
+    Ok(QuoteScanResult {
+        profit_usd,
+        spread_pct,
+        quotes_ok: 2,
+        quotes_failed: 0,
+    })
 }
 
 // =============================================================================
@@ -345,9 +359,11 @@ pub const JUP_MINT: &str = "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN";
 
 /// Busca arbitrage en múltiples pares simultáneamente.
 /// Retorna el mejor profit encontrado y la ruta.
+/// Also updates scan metrics in agent memory.
 pub async fn scan_arbitrage_opportunities(
     base_mint: &str,
     amount: u64,
+    memory: &mut AgentMemory,
 ) -> Option<(f64, String)> {
     let intermediates: Vec<(&str, &str)> = vec![
         (SOL_MINT, "SOL"),
@@ -364,14 +380,30 @@ pub async fn scan_arbitrage_opportunities(
     let mut best: Option<(f64, String)> = None;
 
     for (mint, symbol) in &intermediates {
-        if let Some(profit) = get_best_jupiter_quote(base_mint, mint, amount).await {
-            let route = format!("USDC->{}->USDC", symbol);
-            utils::log_info(&format!("  {} = +${:.4}", route, profit));
-            match &best {
-                Some((b, _)) if profit <= *b => {}
-                _ => { best = Some((profit, route)); }
+        let route = format!("USDC->{}->USDC", symbol);
+        match get_best_jupiter_quote(base_mint, mint, amount).await {
+            Ok(result) => {
+                memory.scan_quotes_ok += result.quotes_ok;
+                memory.record_scan_spread(result.spread_pct, &route);
+
+                if result.profit_usd > config::MIN_PROFIT_USD {
+                    utils::log_info(&format!("  {} = +${:.4} ({:+.3}%)", route, result.profit_usd, result.spread_pct));
+                    match &best {
+                        Some((b, _)) if result.profit_usd <= *b => {}
+                        _ => { best = Some((result.profit_usd, route)); }
+                    }
+                } else {
+                    utils::log_info(&format!("  {} = ${:.4} ({:+.3}%)", route, result.profit_usd, result.spread_pct));
+                }
+            }
+            Err(e) => {
+                memory.scan_quotes_failed += 1;
+                utils::log_error(&format!("  {} quote failed: {}", route, e));
             }
         }
+
+        // Delay between pairs to avoid rate limiting
+        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
     }
 
     best
@@ -383,7 +415,7 @@ pub async fn scan_arbitrage_opportunities(
 
 /// Triangular arbitrage: USDC -> token1 -> token2 -> USDC
 /// Tries multiple 3-hop paths to find price inefficiencies.
-pub async fn scan_triangular_arbitrage(amount: u64) -> Option<(f64, String)> {
+pub async fn scan_triangular_arbitrage(amount: u64, memory: &mut AgentMemory) -> Option<(f64, String)> {
     let slippage = SlippageConfig::default();
 
     // Promising triangular routes
@@ -401,36 +433,53 @@ pub async fn scan_triangular_arbitrage(amount: u64) -> Option<(f64, String)> {
     let flash_fee = amount * 9 / 10_000;
 
     for (mid1, mid2, sym1, sym2) in &triangles {
+        let route = format!("USDC->{}->{}->USDC", sym1, sym2);
+
         // Leg 1: USDC -> mid1
         let q1 = match get_jupiter_quote_with_slippage(USDC_MINT, mid1, amount, &slippage).await {
-            Ok(q) => q, Err(_) => continue,
+            Ok(q) => { memory.record_quote_ok(); q }
+            Err(_) => { memory.record_quote_failed(); continue; }
         };
         let amt1 = q1.out_amount.parse::<u64>().unwrap_or(0);
         if amt1 == 0 { continue; }
 
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
         // Leg 2: mid1 -> mid2
         let q2 = match get_jupiter_quote_with_slippage(mid1, mid2, amt1, &slippage).await {
-            Ok(q) => q, Err(_) => continue,
+            Ok(q) => { memory.record_quote_ok(); q }
+            Err(_) => { memory.record_quote_failed(); continue; }
         };
         let amt2 = q2.out_amount.parse::<u64>().unwrap_or(0);
         if amt2 == 0 { continue; }
 
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
         // Leg 3: mid2 -> USDC
         let q3 = match get_jupiter_quote_with_slippage(mid2, USDC_MINT, amt2, &slippage).await {
-            Ok(q) => q, Err(_) => continue,
+            Ok(q) => { memory.record_quote_ok(); q }
+            Err(_) => { memory.record_quote_failed(); continue; }
         };
         let final_amt = q3.out_amount.parse::<u64>().unwrap_or(0);
 
         let total_cost = amount + flash_fee;
+        let profit_raw = final_amt as i64 - total_cost as i64;
+        let spread_pct = profit_raw as f64 / amount as f64 * 100.0;
+        let profit_usd = profit_raw as f64 / 1_000_000.0;
+
+        memory.record_scan_spread(spread_pct, &route);
+
         if final_amt > total_cost {
-            let profit = (final_amt - total_cost) as f64 / 1_000_000.0;
-            let route = format!("USDC->{}->{}->USDC", sym1, sym2);
-            utils::log_info(&format!("  triangular {} = +${:.4}", route, profit));
+            utils::log_info(&format!("  triangular {} = +${:.4} ({:+.3}%)", route, profit_usd, spread_pct));
             match &best {
-                Some((b, _)) if profit <= *b => {}
-                _ => { best = Some((profit, route)); }
+                Some((b, _)) if profit_usd <= *b => {}
+                _ => { best = Some((profit_usd, route)); }
             }
+        } else {
+            utils::log_info(&format!("  triangular {} = ${:.4} ({:+.3}%)", route, profit_usd, spread_pct));
         }
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
     }
 
     best
@@ -442,28 +491,36 @@ pub async fn scan_triangular_arbitrage(amount: u64) -> Option<(f64, String)> {
 
 /// Detects USDC/USDT price deviations.
 /// When stablecoins depeg even slightly, there's profit in the spread.
-pub async fn scan_stablecoin_arb(amount: u64) -> Option<(f64, String)> {
+pub async fn scan_stablecoin_arb(amount: u64, memory: &mut AgentMemory) -> Option<(f64, String)> {
     let slippage = SlippageConfig::default();
     let flash_fee = amount * 9 / 10_000;
+    let route = "USDC->USDT->USDC (depeg)";
 
     // USDC -> USDT -> USDC
     let q1 = match get_jupiter_quote_with_slippage(USDC_MINT, USDT_MINT, amount, &slippage).await {
-        Ok(q) => q, Err(_) => return None,
+        Ok(q) => { memory.record_quote_ok(); q }
+        Err(_) => { memory.record_quote_failed(); return None; }
     };
     let usdt_amount = q1.out_amount.parse::<u64>().unwrap_or(0);
     if usdt_amount == 0 { return None; }
 
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
     let q2 = match get_jupiter_quote_with_slippage(USDT_MINT, USDC_MINT, usdt_amount, &slippage).await {
-        Ok(q) => q, Err(_) => return None,
+        Ok(q) => { memory.record_quote_ok(); q }
+        Err(_) => { memory.record_quote_failed(); return None; }
     };
     let final_usdc = q2.out_amount.parse::<u64>().unwrap_or(0);
 
     let total_cost = amount + flash_fee;
-    if final_usdc > total_cost {
-        let profit = (final_usdc - total_cost) as f64 / 1_000_000.0;
-        if profit > 0.01 { // Even tiny stablecoin profits count
-            return Some((profit, "USDC->USDT->USDC (depeg)".to_string()));
-        }
+    let profit_raw = final_usdc as i64 - total_cost as i64;
+    let spread_pct = profit_raw as f64 / amount as f64 * 100.0;
+    let profit_usd = profit_raw as f64 / 1_000_000.0;
+
+    memory.record_scan_spread(spread_pct, route);
+
+    if final_usdc > total_cost && profit_usd > 0.01 {
+        return Some((profit_usd, route.to_string()));
     }
 
     None
@@ -476,7 +533,7 @@ pub async fn scan_stablecoin_arb(amount: u64) -> Option<(f64, String)> {
 /// Liquid Staking Token premium detection.
 /// mSOL/jitoSOL/bSOL should trade at ~1:1 with SOL but sometimes have premiums.
 /// Route: USDC -> SOL -> LST -> USDC (exploiting LST premium/discount)
-pub async fn scan_lst_premium(amount: u64) -> Option<(f64, String)> {
+pub async fn scan_lst_premium(amount: u64, memory: &mut AgentMemory) -> Option<(f64, String)> {
     let slippage = SlippageConfig::default();
     let flash_fee = amount * 9 / 10_000;
 
@@ -489,33 +546,51 @@ pub async fn scan_lst_premium(amount: u64) -> Option<(f64, String)> {
     let mut best: Option<(f64, String)> = None;
 
     for (lst_mint, symbol) in &lst_tokens {
+        let route = format!("USDC->{}->SOL->USDC (LST)", symbol);
+
         // Direction 1: USDC -> LST -> SOL -> USDC
         let q1 = match get_jupiter_quote_with_slippage(USDC_MINT, lst_mint, amount, &slippage).await {
-            Ok(q) => q, Err(_) => continue,
+            Ok(q) => { memory.record_quote_ok(); q }
+            Err(_) => { memory.record_quote_failed(); continue; }
         };
         let lst_amt = q1.out_amount.parse::<u64>().unwrap_or(0);
         if lst_amt == 0 { continue; }
 
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
         let q2 = match get_jupiter_quote_with_slippage(lst_mint, SOL_MINT, lst_amt, &slippage).await {
-            Ok(q) => q, Err(_) => continue,
+            Ok(q) => { memory.record_quote_ok(); q }
+            Err(_) => { memory.record_quote_failed(); continue; }
         };
         let sol_amt = q2.out_amount.parse::<u64>().unwrap_or(0);
         if sol_amt == 0 { continue; }
 
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
         let q3 = match get_jupiter_quote_with_slippage(SOL_MINT, USDC_MINT, sol_amt, &slippage).await {
-            Ok(q) => q, Err(_) => continue,
+            Ok(q) => { memory.record_quote_ok(); q }
+            Err(_) => { memory.record_quote_failed(); continue; }
         };
         let final_usdc = q3.out_amount.parse::<u64>().unwrap_or(0);
 
         let total_cost = amount + flash_fee;
+        let profit_raw = final_usdc as i64 - total_cost as i64;
+        let spread_pct = profit_raw as f64 / amount as f64 * 100.0;
+        let profit_usd = profit_raw as f64 / 1_000_000.0;
+
+        memory.record_scan_spread(spread_pct, &route);
+
         if final_usdc > total_cost {
-            let profit = (final_usdc - total_cost) as f64 / 1_000_000.0;
-            let route = format!("USDC->{}->SOL->USDC (LST premium)", symbol);
+            utils::log_info(&format!("  LST {} = +${:.4} ({:+.3}%)", route, profit_usd, spread_pct));
             match &best {
-                Some((b, _)) if profit <= *b => {}
-                _ => { best = Some((profit, route)); }
+                Some((b, _)) if profit_usd <= *b => {}
+                _ => { best = Some((profit_usd, route)); }
             }
+        } else {
+            utils::log_info(&format!("  LST {} = ${:.4} ({:+.3}%)", route, profit_usd, spread_pct));
         }
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
     }
 
     best
@@ -526,19 +601,20 @@ pub async fn scan_lst_premium(amount: u64) -> Option<(f64, String)> {
 // =============================================================================
 
 /// Runs ALL arbitrage strategies and returns the single best opportunity.
-pub async fn scan_all_strategies(amount: u64) -> Option<(f64, String)> {
+/// Updates scan metrics in agent memory for Telegram reporting.
+pub async fn scan_all_strategies(amount: u64, memory: &mut AgentMemory) -> Option<(f64, String)> {
     utils::log_info("Escaneando estrategias...");
 
     let mut best: Option<(f64, String)> = None;
 
     // Strategy 1: Simple round-trip (9 pairs)
-    if let Some((p, r)) = scan_arbitrage_opportunities(USDC_MINT, amount).await {
+    if let Some((p, r)) = scan_arbitrage_opportunities(USDC_MINT, amount, memory).await {
         utils::log_success(&format!("  [round-trip] {} = +${:.4}", r, p));
         best = Some((p, r));
     }
 
     // Strategy 2: Triangular (7 paths)
-    if let Some((p, r)) = scan_triangular_arbitrage(amount).await {
+    if let Some((p, r)) = scan_triangular_arbitrage(amount, memory).await {
         utils::log_success(&format!("  [triangular] {} = +${:.4}", r, p));
         match &best {
             Some((b, _)) if p <= *b => {}
@@ -547,7 +623,7 @@ pub async fn scan_all_strategies(amount: u64) -> Option<(f64, String)> {
     }
 
     // Strategy 3: Stablecoin depeg
-    if let Some((p, r)) = scan_stablecoin_arb(amount).await {
+    if let Some((p, r)) = scan_stablecoin_arb(amount, memory).await {
         utils::log_success(&format!("  [stablecoin] {} = +${:.4}", r, p));
         match &best {
             Some((b, _)) if p <= *b => {}
@@ -556,7 +632,7 @@ pub async fn scan_all_strategies(amount: u64) -> Option<(f64, String)> {
     }
 
     // Strategy 4: LST premium
-    if let Some((p, r)) = scan_lst_premium(amount).await {
+    if let Some((p, r)) = scan_lst_premium(amount, memory).await {
         utils::log_success(&format!("  [LST] {} = +${:.4}", r, p));
         match &best {
             Some((b, _)) if p <= *b => {}
@@ -567,7 +643,8 @@ pub async fn scan_all_strategies(amount: u64) -> Option<(f64, String)> {
     if let Some((p, ref r)) = best {
         utils::log_success(&format!("MEJOR: {} = +${:.4}", r, p));
     } else {
-        utils::log_info("  Ninguna estrategia rentable este ciclo");
+        let scan_info = memory.scan_summary();
+        utils::log_info(&format!("  Sin oportunidades rentables. {}", scan_info));
     }
 
     best
