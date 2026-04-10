@@ -125,6 +125,18 @@ pub struct AgentMemory {
     pub scan_best_spread_pct: f64,
     #[serde(skip)]
     pub scan_best_spread_route: String,
+
+    // Liquidation scan metrics
+    #[serde(skip)]
+    pub liq_scans_total: u64,
+    #[serde(skip)]
+    pub liq_scans_failed: u64,
+    #[serde(skip)]
+    pub liq_obligations_seen: u64,
+    #[serde(skip)]
+    pub liq_with_debt_seen: u64,
+    #[serde(skip)]
+    pub liq_in_range_seen: u64,
 }
 
 const MEMORY_PATH: &str = "data/memory.json";
@@ -168,6 +180,12 @@ impl AgentMemory {
             scan_near_misses: 0,
             scan_best_spread_pct: f64::NEG_INFINITY,
             scan_best_spread_route: String::new(),
+
+            liq_scans_total: 0,
+            liq_scans_failed: 0,
+            liq_obligations_seen: 0,
+            liq_with_debt_seen: 0,
+            liq_in_range_seen: 0,
         }
     }
 
@@ -193,6 +211,18 @@ impl AgentMemory {
         }
     }
 
+    /// Record liquidation scan result
+    pub fn record_liq_scan(&mut self, fetched: usize, with_debt: usize, in_range: usize, error: bool) {
+        self.liq_scans_total += 1;
+        if error {
+            self.liq_scans_failed += 1;
+        } else {
+            self.liq_obligations_seen += fetched as u64;
+            self.liq_with_debt_seen += with_debt as u64;
+            self.liq_in_range_seen += in_range as u64;
+        }
+    }
+
     /// Get scan metrics summary for Telegram
     pub fn scan_summary(&self) -> String {
         let total_quotes = self.scan_quotes_ok + self.scan_quotes_failed;
@@ -211,10 +241,23 @@ impl AgentMemory {
         } else {
             self.scan_best_spread_route.clone()
         };
+
+        let liq_ok = self.liq_scans_total - self.liq_scans_failed;
+        let liq_info = if self.liq_scans_total > 0 {
+            format!(
+                "\nLiq scans: {}/{} OK\nObligaciones: {} vistas, {} con deuda, {} en rango",
+                liq_ok, self.liq_scans_total,
+                self.liq_obligations_seen, self.liq_with_debt_seen, self.liq_in_range_seen
+            )
+        } else {
+            "\nLiq scans: pendiente".to_string()
+        };
+
         format!(
-            "Quotes: {}/{} OK ({:.0}%)\nNear-misses: {}\nMejor spread: {} ({})",
+            "Arb quotes: {}/{} OK ({:.0}%)\nNear-misses: {}\nMejor spread: {} ({}){}",
             self.scan_quotes_ok, total_quotes, success_rate,
-            self.scan_near_misses, best_spread, best_route
+            self.scan_near_misses, best_spread, best_route,
+            liq_info
         )
     }
 

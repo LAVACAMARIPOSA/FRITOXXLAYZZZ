@@ -523,37 +523,76 @@ async fn fetch_reserve_info(
     Ok(cache)
 }
 
+/// Result of a liquidation scan with metrics
+pub struct LiquidationScanResult {
+    pub opportunities: Vec<LiquidationOpportunity>,
+    pub total_obligations_fetched: usize,
+    pub total_with_debt: usize,
+    pub total_in_range: usize,
+    pub scan_error: Option<String>,
+}
+
 /// Escanea liquidaciones pequeñas ($10-$500) en Kamino Lending
-pub async fn scan_small_liquidations(client: &RpcClient) -> Vec<LiquidationOpportunity> {
-    utils::log_info("🔍 Escaneando posiciones underwater $10-$500 en Kamino...");
-    
+pub async fn scan_small_liquidations(client: &RpcClient) -> LiquidationScanResult {
+    utils::log_info("Escaneando posiciones underwater $10-$500 en Kamino...");
+
     let min_value = 10.0;
     let max_value = 500.0;
-    
+
     // Obtener todas las obligaciones
     let obligations = match get_all_obligations(client).await {
         Ok(obs) => obs,
         Err(e) => {
-            utils::log_error(&format!("Error obteniendo obligaciones: {}", e));
-            return Vec::new();
+            let err_msg = format!("Error obteniendo obligaciones: {}", e);
+            utils::log_error(&err_msg);
+            return LiquidationScanResult {
+                opportunities: Vec::new(),
+                total_obligations_fetched: 0,
+                total_with_debt: 0,
+                total_in_range: 0,
+                scan_error: Some(err_msg),
+            };
         }
     };
-    
+
+    let total_fetched = obligations.len();
     if obligations.is_empty() {
         utils::log_warning("No se encontraron obligaciones");
-        return Vec::new();
+        return LiquidationScanResult {
+            opportunities: Vec::new(),
+            total_obligations_fetched: 0,
+            total_with_debt: 0,
+            total_in_range: 0,
+            scan_error: None,
+        };
     }
-    
+
+    // Count obligations with debt for metrics
+    let total_with_debt = obligations.iter().filter(|(_, o)| o.has_debt()).count();
+
+    // Count those in our value range (even if not liquidatable)
+    let total_in_range = obligations.iter().filter(|(_, o)| {
+        let dep = o.deposited_value_usd();
+        o.has_debt() && dep >= min_value && dep <= max_value
+    }).count();
+
     // Filtrar posiciones liquidables en el rango
     let liquidatable = filter_liquidatable_positions(obligations, min_value, max_value);
-    
+
     utils::log_info(&format!(
-        "Posiciones liquidables encontradas en rango ${}-${}: {}",
+        "Obligaciones: {} total, {} con deuda, {} en rango ${}-${}, {} liquidables",
+        total_fetched, total_with_debt, total_in_range,
         min_value, max_value, liquidatable.len()
     ));
-    
+
     if liquidatable.is_empty() {
-        return Vec::new();
+        return LiquidationScanResult {
+            opportunities: Vec::new(),
+            total_obligations_fetched: total_fetched,
+            total_with_debt,
+            total_in_range,
+            scan_error: None,
+        };
     }
     
     // Obtener información de reserves
@@ -585,11 +624,17 @@ pub async fn scan_small_liquidations(client: &RpcClient) -> Vec<LiquidationOppor
     }
     
     utils::log_success(&format!(
-        "✅ Escaneo completado. {} oportunidades de liquidación encontradas",
+        "Escaneo completado. {} oportunidades de liquidacion encontradas",
         opportunities.len()
     ));
-    
-    opportunities
+
+    LiquidationScanResult {
+        opportunities,
+        total_obligations_fetched: total_fetched,
+        total_with_debt,
+        total_in_range,
+        scan_error: None,
+    }
 }
 
 /// Obtiene las obligaciones de un usuario específico

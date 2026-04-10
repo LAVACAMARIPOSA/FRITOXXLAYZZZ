@@ -83,6 +83,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut running = true;
     let mut last_summary_cycle: u64 = 0;
+    let mut last_liq_scan_cycle: u64 = 0;
+    let mut last_liq_error: Option<String> = None;
 
     // ====================================================================
     // MAIN LOOP - 24/7 Autonomous Agent
@@ -214,10 +216,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None => {}
             }
 
-            // STRATEGY 2: Liquidations
-            if strategy.should_scan_liquidations(&agent_memory) {
-                let opps = liquidation::scan_small_liquidations(&client).await;
-                for opp in &opps {
+            // STRATEGY 2: Liquidations (throttled - every 30 cycles to avoid RPC overload)
+            if strategy.should_scan_liquidations(&agent_memory) && (cycle - last_liq_scan_cycle >= 30) {
+                last_liq_scan_cycle = cycle;
+                let scan_result = liquidation::scan_small_liquidations(&client).await;
+
+                // Track metrics
+                let has_error = scan_result.scan_error.is_some();
+                agent_memory.record_liq_scan(
+                    scan_result.total_obligations_fetched,
+                    scan_result.total_with_debt,
+                    scan_result.total_in_range,
+                    has_error,
+                );
+
+                if let Some(ref err) = scan_result.scan_error {
+                    // Only notify on first error or if error changed
+                    if last_liq_error.as_deref() != Some(err) {
+                        telegram.send_message(&format!(
+                            "Liquidation scan error:\n{}", err
+                        )).await;
+                        last_liq_error = Some(err.clone());
+                    }
+                } else {
+                    last_liq_error = None;
+                    if scan_result.total_obligations_fetched > 0 {
+                        utils::log_info(&format!(
+                            "Liq scan: {} obligaciones, {} con deuda, {} en rango, {} liquidables",
+                            scan_result.total_obligations_fetched,
+                            scan_result.total_with_debt,
+                            scan_result.total_in_range,
+                            scan_result.opportunities.len()
+                        ));
+                    }
+                }
+
+                for opp in &scan_result.opportunities {
                     let decision = strategy.evaluate_liquidation(
                         &agent_memory, opp.health_factor,
                         opp.estimated_profit_usd, opp.borrow_factor_adjusted_debt_usd,
