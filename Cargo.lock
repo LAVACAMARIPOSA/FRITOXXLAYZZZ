@@ -5420,7 +5420,7 @@ dependencies = [
 
 [[package]]
 name = "solana-zero-capital-beast"
-version = "1.0.0"
+version = "2.1.0"
 dependencies = [
  "base64 0.22.1",
  "bincode",
