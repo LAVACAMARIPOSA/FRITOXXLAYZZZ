@@ -24,6 +24,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
 
     utils::log_success("Solana Zero-Capital Beast v2.0 - Agente Autonomo");
+    utils::log_info(&format!("Build: {}", env!("CARGO_PKG_VERSION")));
     utils::log_info("Memoria persistente + Estrategia adaptativa + Telegram");
 
     if config::DRY_RUN {
@@ -83,7 +84,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    telegram.notify_started(&user_pubkey.to_string(), sol_balance).await;
+    let build_id = format!("v{}-nobackoff", env!("CARGO_PKG_VERSION"));
+    telegram.notify_started(&user_pubkey.to_string(), sol_balance, &build_id).await;
 
     let mut running = true;
     let mut last_summary_cycle: u64 = 0;

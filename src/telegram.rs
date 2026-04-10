@@ -474,10 +474,10 @@ impl TelegramBot {
 
     // -- notification helpers ---------------------------------------------
 
-    pub async fn notify_started(&mut self, wallet: &str, balance: f64) {
+    pub async fn notify_started(&mut self, wallet: &str, balance: f64, build_id: &str) {
         self.send_alert(&format!(
-            "<b>Agente iniciado</b>\nWallet: <code>{}</code>\nBalance: <b>{:.4} SOL</b>\nModo: 24/7 autonomo\n\nHablame! Entiendo espanol.",
-            wallet, balance
+            "<b>Agente iniciado</b>\nBuild: <code>{}</code>\nWallet: <code>{}</code>\nBalance: <b>{:.4} SOL</b>\nModo: 24/7 autonomo\n\nHablame! Entiendo espanol.",
+            build_id, wallet, balance
         )).await;
     }
 
