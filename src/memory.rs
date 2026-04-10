@@ -151,12 +151,17 @@ impl RouteLearnEntry {
         self.consecutive_failures += 1;
         self.last_failure_ts = current_timestamp();
 
-        // Exponential backoff: skip for 2^(consecutive_failures) * 10 seconds
-        // Max backoff: ~10 minutes (2^6 * 10 = 640s)
-        let backoff_secs = (10u64).saturating_mul(
-            2u64.saturating_pow(self.consecutive_failures.min(6))
-        );
+        // Gentle backoff: skip for consecutive_failures * 5 seconds
+        // Max backoff: 30 seconds (6 * 5 = 30s), then auto-resets
+        // This prevents locking out routes permanently
+        let capped_failures = self.consecutive_failures.min(6);
+        let backoff_secs = (capped_failures as u64) * 5;
         self.skip_until_ts = current_timestamp() + backoff_secs;
+
+        // Auto-reset after 6 consecutive failures so we always retry
+        if self.consecutive_failures >= 6 {
+            self.consecutive_failures = 0;
+        }
     }
 
     /// Should this route be skipped right now?
@@ -439,6 +444,14 @@ impl AgentMemory {
     // -----------------------------------------------------------------------
     // Route Learning - the brain of the bot
     // -----------------------------------------------------------------------
+
+    /// Clear all backoffs (called on startup to ensure fresh start)
+    pub fn clear_all_backoffs(&mut self) {
+        for entry in self.route_learning.values_mut() {
+            entry.skip_until_ts = 0;
+            entry.consecutive_failures = 0;
+        }
+    }
 
     /// Record a route scan result (success with spread data)
     pub fn learn_route_success(&mut self, route: &str, spread_pct: f64) {

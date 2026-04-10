@@ -32,6 +32,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Load persistent memory
     let mut agent_memory = AgentMemory::load();
+    // Clear all backoffs on restart - routes deserve a fresh chance each session
+    agent_memory.clear_all_backoffs();
+    agent_memory.save();
     utils::log_success(&format!(
         "Memoria: {} ciclos previos, ${:.2} profit acumulado, riesgo: {:?}",
         agent_memory.total_cycles, agent_memory.total_profit_usd, agent_memory.risk_level
@@ -191,9 +194,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let scan_report = jupiter::scan_all_strategies(flash_amount, &mut agent_memory).await;
 
-            // Send scan report to Telegram every cycle so user sees everything
-            let tg_msg = scan_report.to_telegram_message(cycle, agent_memory.get_api_delay_ms());
-            telegram.send_message(&tg_msg).await;
+            // Send scan report to Telegram (only when there's actual activity)
+            if scan_report.routes_scanned > 0 || cycle % 30 == 0 {
+                let tg_msg = scan_report.to_telegram_message(cycle, agent_memory.get_api_delay_ms());
+                telegram.send_message(&tg_msg).await;
+            }
 
             // If we found a profitable opportunity, evaluate and try to execute
             if let Some((profit, ref route)) = scan_report.best {
