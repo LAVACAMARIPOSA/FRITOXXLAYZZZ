@@ -32,8 +32,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Load persistent memory
     let mut agent_memory = AgentMemory::load();
-    // Clear all backoffs on restart - routes deserve a fresh chance each session
+    // Fresh start each session - clear backoffs and reset delay
     agent_memory.clear_all_backoffs();
+    agent_memory.adaptive_scanner.api_delay_ms = 300;
     agent_memory.save();
     utils::log_success(&format!(
         "Memoria: {} ciclos previos, ${:.2} profit acumulado, riesgo: {:?}",

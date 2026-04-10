@@ -165,8 +165,10 @@ impl RouteLearnEntry {
     }
 
     /// Should this route be skipped right now?
+    /// Currently always returns false - we always try every route.
+    /// Learning data is still collected for priority ordering.
     pub fn should_skip(&self) -> bool {
-        self.skip_until_ts > 0 && current_timestamp() < self.skip_until_ts
+        false
     }
 
     /// Compute priority score (called by learning cycle)
@@ -511,22 +513,17 @@ impl AgentMemory {
         }
 
         // 2. Adapt API delay based on recent failure rate
+        // Keep it simple: 300ms base, only increase slightly if needed
         let total_quotes = self.scan_quotes_ok + self.scan_quotes_failed;
-        if total_quotes > 10 {
+        if total_quotes > 20 {
             let fail_rate = self.scan_quotes_failed as f64 / total_quotes as f64;
 
-            if fail_rate > 0.5 {
-                // Too many failures → slow down significantly
+            if fail_rate > 0.7 {
                 self.adaptive_scanner.api_delay_ms =
-                    (self.adaptive_scanner.api_delay_ms + 100).min(2000);
-            } else if fail_rate > 0.3 {
-                // Moderate failures → slow down a bit
+                    (self.adaptive_scanner.api_delay_ms + 50).min(800);
+            } else if fail_rate < 0.3 && self.adaptive_scanner.api_delay_ms > 200 {
                 self.adaptive_scanner.api_delay_ms =
-                    (self.adaptive_scanner.api_delay_ms + 50).min(1500);
-            } else if fail_rate < 0.1 && self.adaptive_scanner.api_delay_ms > 150 {
-                // Low failure rate → speed up cautiously
-                self.adaptive_scanner.api_delay_ms =
-                    self.adaptive_scanner.api_delay_ms.saturating_sub(25).max(150);
+                    self.adaptive_scanner.api_delay_ms.saturating_sub(50).max(200);
             }
         }
 
